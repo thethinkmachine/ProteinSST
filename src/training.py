@@ -212,18 +212,21 @@ class Trainer:
         total_loss = 0.0
         total_q8_loss = 0.0
         total_q3_loss = 0.0
+
         all_q8_preds = []
         all_q8_targets = []
         all_q3_preds = []
         all_q3_targets = []
+
         total_samples = 0
         
         for batch in self.val_loader:
             features = batch['features'].to(self.device)
-            q8_targets = batch['sst8'].to(self.device)
-            q3_targets = batch['sst3'].to(self.device)
+            q8_targets = batch['sst8'].to(self.device)   # (B, L)
+            q3_targets = batch['sst3'].to(self.device)   # (B, L)
             
-            q8_logits, q3_logits = self.model(features)
+            q8_logits, q3_logits = self.model(features)  # (B, L, C)
+            
             loss, q8_loss, q3_loss = self.loss_fn(
                 q8_logits, q8_targets, q3_logits, q3_targets
             )
@@ -234,12 +237,22 @@ class Trainer:
             total_q3_loss += q3_loss.item() * batch_size
             total_samples += batch_size
             
-            all_q8_preds.append(q8_logits)
-            all_q8_targets.append(q8_targets)
-            all_q3_preds.append(q3_logits)
-            all_q3_targets.append(q3_targets)
+            # --------------------------------------------------
+            # MASK PAD TOKENS AND FLATTEN
+            # --------------------------------------------------
+            mask = q8_targets != -100  # (B, L)
+
+            # Q8
+            q8_preds = q8_logits.argmax(dim=-1)  # (B, L)
+            all_q8_preds.append(q8_preds[mask]) # (N,)
+            all_q8_targets.append(q8_targets[mask])
+
+            # Q3
+            q3_preds = q3_logits.argmax(dim=-1)
+            all_q3_preds.append(q3_preds[mask])
+            all_q3_targets.append(q3_targets[mask])
         
-        # Concatenate predictions
+        # Concatenate *flattened* tensors
         all_q8_preds = torch.cat(all_q8_preds, dim=0)
         all_q8_targets = torch.cat(all_q8_targets, dim=0)
         all_q3_preds = torch.cat(all_q3_preds, dim=0)

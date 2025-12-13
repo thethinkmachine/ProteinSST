@@ -454,7 +454,7 @@ def evaluate_model(
     all_q3_preds = []
     all_q3_targets = []
     
-    # For SOV computation
+    # For SOV computation (per-protein)
     all_q8_pred_strs = []
     all_q8_target_strs = []
     all_q3_pred_strs = []
@@ -467,38 +467,56 @@ def evaluate_model(
             q3_targets = batch['sst3'].to(device)
             lengths = batch['lengths']
             
-            # Forward pass
             q8_logits, q3_logits = model(features)
             
-            # Get predictions
-            q8_preds = q8_logits.argmax(dim=-1)
+            q8_preds = q8_logits.argmax(dim=-1)  # (B, L)
             q3_preds = q3_logits.argmax(dim=-1)
             
-            all_q8_preds.append(q8_preds)
-            all_q8_targets.append(q8_targets)
-            all_q3_preds.append(q3_preds)
-            all_q3_targets.append(q3_targets)
+            # --------------------------------------------------
+            # MASK + FLATTEN FOR TOKEN-LEVEL METRICS
+            # --------------------------------------------------
+            mask = q8_targets != -100  # (B, L)
             
-            # Convert to strings for SOV
+            all_q8_preds.append(q8_preds[mask])      # (N,)
+            all_q8_targets.append(q8_targets[mask])
+            all_q3_preds.append(q3_preds[mask])
+            all_q3_targets.append(q3_targets[mask])
+            
+            # --------------------------------------------------
+            # PER-PROTEIN STRINGS FOR SOV
+            # --------------------------------------------------
             if compute_sov:
                 for i, length in enumerate(lengths):
-                    q8_pred_str = ''.join([IDX_TO_SST8[idx.item()] for idx in q8_preds[i, :length]])
-                    q8_target_str = ''.join([IDX_TO_SST8[idx.item()] for idx in q8_targets[i, :length] if idx.item() != -100])
-                    q3_pred_str = ''.join([IDX_TO_SST3[idx.item()] for idx in q3_preds[i, :length]])
-                    q3_target_str = ''.join([IDX_TO_SST3[idx.item()] for idx in q3_targets[i, :length] if idx.item() != -100])
+                    q8_pred_str = ''.join(
+                        IDX_TO_SST8[idx.item()] for idx in q8_preds[i, :length]
+                    )
+                    q8_target_str = ''.join(
+                        IDX_TO_SST8[idx.item()]
+                        for idx in q8_targets[i, :length]
+                        if idx.item() != -100
+                    )
+                    
+                    q3_pred_str = ''.join(
+                        IDX_TO_SST3[idx.item()] for idx in q3_preds[i, :length]
+                    )
+                    q3_target_str = ''.join(
+                        IDX_TO_SST3[idx.item()]
+                        for idx in q3_targets[i, :length]
+                        if idx.item() != -100
+                    )
                     
                     all_q8_pred_strs.append(q8_pred_str)
                     all_q8_target_strs.append(q8_target_str)
                     all_q3_pred_strs.append(q3_pred_str)
                     all_q3_target_strs.append(q3_target_str)
     
-    # Concatenate all predictions
+    # Concatenate flattened tensors (SAFE)
     all_q8_preds = torch.cat(all_q8_preds, dim=0)
     all_q8_targets = torch.cat(all_q8_targets, dim=0)
     all_q3_preds = torch.cat(all_q3_preds, dim=0)
     all_q3_targets = torch.cat(all_q3_targets, dim=0)
     
-    # Compute metrics
+    # Metrics
     q8_accuracy = compute_q8_accuracy(all_q8_preds, all_q8_targets)
     q3_accuracy = compute_q3_accuracy(all_q3_preds, all_q3_targets)
     
@@ -508,7 +526,7 @@ def evaluate_model(
     q8_confusion = compute_confusion_matrix(all_q8_preds, all_q8_targets, 8)
     q3_confusion = compute_confusion_matrix(all_q3_preds, all_q3_targets, 3)
     
-    # SOV scores
+    # SOV
     q8_sov = None
     q3_sov = None
     if compute_sov:
