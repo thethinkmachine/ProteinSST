@@ -1,0 +1,15 @@
+{
+  "exact_match_train_ids": [],
+  "exact_match_test_ids": [],
+  "duplicate_train_ids": [],
+  "duplicate_test_ids": [],
+  "high_similarity_pairs": [
+    {
+      "test_id": 371,
+      "train_id": 6552,
+      "similarity": 0.9873417721518988,
+      "test_len": 39,
+      "train_len": 40
+    }
+  ]
+}
