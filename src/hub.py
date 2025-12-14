@@ -69,7 +69,7 @@ def push_model_to_hub(
     Args:
         model: Trained PyTorch model
         repo_id: HuggingFace Hub repository ID (e.g., "username/protein-sst-tier1")
-        config: Model configuration dict (saved as config.json)
+        config: Model configuration dict or dataclass (saved as config.json)
         metrics: Training metrics to include in commit message
         commit_message: Custom commit message (auto-generated if None)
         private: Whether to make the repo private
@@ -79,6 +79,11 @@ def push_model_to_hub(
     Returns:
         URL of the uploaded model
     """
+    # Convert dataclass to dict if necessary
+    if config is not None and hasattr(config, '__dataclass_fields__'):
+        import dataclasses
+        config = dataclasses.asdict(config)
+    
     if not HAS_HUB:
         raise ImportError(
             "huggingface-hub is required for Hub push. "
