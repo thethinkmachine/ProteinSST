@@ -157,10 +157,13 @@ class TrainingConfig:
     checkpoint_dir: str = 'checkpoints'
     save_every: int = 5
     
-    # Logging
+    # Logging & Tracking
     log_every: int = 100
-    use_wandb: bool = False
+    use_tracking: bool = False  # Enable Trackio/W&B experiment tracking
     experiment_name: str = 'protein_sst'
+    
+    # HuggingFace Hub
+    hub_model_id: Optional[str] = None  # e.g., "username/protein-sst-tier1"
     
     # Device
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'

@@ -16,7 +16,11 @@ from pathlib import Path
 from tqdm import tqdm
 import numpy as np
 
-from .metrics import compute_q8_accuracy, compute_q3_accuracy, EvaluationReport, evaluate_model
+from .metrics import (
+    compute_q8_accuracy, compute_q3_accuracy,
+    compute_sst8_per_class_metrics, compute_sst3_per_class_metrics,
+    EvaluationReport, evaluate_model,
+)
 from .losses import MultiTaskLoss
 
 
@@ -26,26 +30,38 @@ from .losses import MultiTaskLoss
 
 class EarlyStopping:
     """
-    Early stopping to halt training when validation loss stops improving.
+    Early stopping to halt training when the composite metric stops improving.
+    
+    Uses harmonic mean of Q8 and Q3 macro F1 scores:
+        score = 2 * q8_f1 * q3_f1 / (q8_f1 + q3_f1)
+    
+    This metric balances both tasks and penalizes poor performance on either.
     """
     
-    def __init__(self, patience: int = 10, min_delta: float = 1e-4, mode: str = 'min'):
+    def __init__(self, patience: int = 10, min_delta: float = 1e-4):
         self.patience = patience
         self.min_delta = min_delta
-        self.mode = mode
         self.counter = 0
         self.best_score = None
         self.early_stop = False
     
-    def __call__(self, score: float) -> bool:
+    @staticmethod
+    def compute_harmonic_f1(q8_f1: float, q3_f1: float) -> float:
+        """Compute harmonic mean of Q8 and Q3 F1 scores."""
+        if q8_f1 + q3_f1 == 0:
+            return 0.0
+        return 2 * q8_f1 * q3_f1 / (q8_f1 + q3_f1)
+    
+    def __call__(self, q8_f1: float, q3_f1: float) -> bool:
+        """Check if training should stop based on harmonic F1 score."""
+        score = self.compute_harmonic_f1(q8_f1, q3_f1)
+        
         if self.best_score is None:
             self.best_score = score
             return False
         
-        if self.mode == 'min':
-            improved = score < self.best_score - self.min_delta
-        else:
-            improved = score > self.best_score + self.min_delta
+        # Higher is better for F1
+        improved = score > self.best_score + self.min_delta
         
         if improved:
             self.best_score = score
@@ -93,6 +109,11 @@ class Trainer:
         gradient_clip: float = 1.0,
         log_every: int = 100,
         use_amp: bool = False,
+        # Tracking & Hub
+        use_tracking: bool = False,
+        experiment_name: str = 'protein_sst',
+        hub_model_id: Optional[str] = None,
+        training_config: Optional[Dict] = None,
     ):
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -106,22 +127,33 @@ class Trainer:
         self.log_every = log_every
         self.use_amp = use_amp
         
+        # Tracking & Hub
+        self.use_tracking = use_tracking
+        self.experiment_name = experiment_name
+        self.hub_model_id = hub_model_id
+        self.training_config = training_config or {}
+        self._tracker = None  # Initialized in train()
+        
         # Create checkpoint directory
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
         # Mixed precision
         self.scaler = torch.amp.GradScaler() if use_amp else None
         
-        # Tracking
         self.history = {
             'train_loss': [],
             'val_loss': [],
             'q8_accuracy': [],
             'q3_accuracy': [],
+            'q8_f1': [],
+            'q3_f1': [],
+            'harmonic_f1': [],  # Composite metric for early stopping
             'learning_rate': [],
         }
         self.best_val_loss = float('inf')
         self.best_q8_accuracy = 0.0
+        self.best_q8_f1 = 0.0
+        self.best_harmonic_f1 = 0.0  # Track best composite score
         self.current_epoch = 0
     
     def train_epoch(self) -> Dict[str, float]:
@@ -262,12 +294,20 @@ class Trainer:
         q8_accuracy = compute_q8_accuracy(all_q8_preds, all_q8_targets)
         q3_accuracy = compute_q3_accuracy(all_q3_preds, all_q3_targets)
         
+        # Compute F1 scores
+        q8_per_class = compute_sst8_per_class_metrics(all_q8_preds, all_q8_targets)
+        q3_per_class = compute_sst3_per_class_metrics(all_q3_preds, all_q3_targets)
+        q8_f1 = q8_per_class['macro_avg']['f1']
+        q3_f1 = q3_per_class['macro_avg']['f1']
+        
         return {
             'loss': total_loss / total_samples,
             'q8_loss': total_q8_loss / total_samples,
             'q3_loss': total_q3_loss / total_samples,
             'q8_accuracy': q8_accuracy,
             'q3_accuracy': q3_accuracy,
+            'q8_f1': q8_f1,
+            'q3_f1': q3_f1,
         }
     
     def save_checkpoint(self, filename: str, is_best: bool = False):
@@ -322,7 +362,21 @@ class Trainer:
         Returns:
             Training history
         """
-        early_stopping = EarlyStopping(patience=patience, mode='min')
+        early_stopping = EarlyStopping(patience=patience)
+        
+        # Initialize Trackio/W&B if enabled
+        if self.use_tracking:
+            try:
+                import trackio as wandb
+                self._tracker = wandb
+                wandb.init(
+                    project=self.experiment_name,
+                    config=self.training_config,
+                )
+                print("✓ Experiment tracking enabled (Trackio/W&B)")
+            except ImportError:
+                print("⚠ trackio not installed. Install with: pip install trackio")
+                self.use_tracking = False
         
         print(f"Starting training for {num_epochs} epochs...")
         print(f"Device: {self.device}")
@@ -356,13 +410,39 @@ class Trainer:
             self.history['val_loss'].append(val_metrics['loss'])
             self.history['q8_accuracy'].append(val_metrics['q8_accuracy'])
             self.history['q3_accuracy'].append(val_metrics['q3_accuracy'])
+            self.history['q8_f1'].append(val_metrics['q8_f1'])
+            self.history['q3_f1'].append(val_metrics['q3_f1'])
             self.history['learning_rate'].append(current_lr)
             
-            # Check for best model
-            is_best = val_metrics['loss'] < self.best_val_loss
+            # Compute harmonic mean of F1 scores for model selection
+            harmonic_f1 = EarlyStopping.compute_harmonic_f1(
+                val_metrics['q8_f1'], val_metrics['q3_f1']
+            )
+            self.history['harmonic_f1'].append(harmonic_f1)
+            
+            # Log to Trackio/W&B
+            if self.use_tracking and self._tracker:
+                self._tracker.log({
+                    'epoch': epoch + 1,
+                    'train/loss': train_metrics['loss'],
+                    'train/q8_loss': train_metrics.get('q8_loss', 0),
+                    'train/q3_loss': train_metrics.get('q3_loss', 0),
+                    'val/loss': val_metrics['loss'],
+                    'val/q8_accuracy': val_metrics['q8_accuracy'],
+                    'val/q3_accuracy': val_metrics['q3_accuracy'],
+                    'val/q8_f1': val_metrics['q8_f1'],
+                    'val/q3_f1': val_metrics['q3_f1'],
+                    'val/harmonic_f1': harmonic_f1,
+                    'learning_rate': current_lr,
+                })
+            
+            # Check for best model using harmonic F1 (not loss)
+            is_best = harmonic_f1 > self.best_harmonic_f1
             if is_best:
                 self.best_val_loss = val_metrics['loss']
                 self.best_q8_accuracy = val_metrics['q8_accuracy']
+                self.best_q8_f1 = val_metrics['q8_f1']
+                self.best_harmonic_f1 = harmonic_f1
             
             # Save checkpoints
             if epoch % save_every == 0 or is_best:
@@ -376,12 +456,15 @@ class Trainer:
                 f"Val Loss: {val_metrics['loss']:.4f} | "
                 f"Q8 Acc: {val_metrics['q8_accuracy']:.4f} | "
                 f"Q3 Acc: {val_metrics['q3_accuracy']:.4f} | "
+                f"Q8 F1: {val_metrics['q8_f1']:.4f} | "
+                f"Q3 F1: {val_metrics['q3_f1']:.4f} | "
+                f"H-F1: {harmonic_f1:.4f} | "
                 f"LR: {current_lr:.6f}" +
                 (" *" if is_best else "")
             )
             
-            # Early stopping
-            if early_stopping(val_metrics['loss']):
+            # Early stopping based on harmonic F1
+            if early_stopping(val_metrics['q8_f1'], val_metrics['q3_f1']):
                 print(f"\nEarly stopping triggered at epoch {epoch+1}")
                 break
         
@@ -393,12 +476,51 @@ class Trainer:
         with open(history_path, 'w') as f:
             json.dump(self.history, f, indent=2)
         
+        # Finish tracking
+        if self.use_tracking and self._tracker:
+            self._tracker.finish()
+            print("✓ Experiment tracking finished")
+        
+        # Push best model to HuggingFace Hub
+        if self.hub_model_id:
+            self._push_to_hub()
+        
         print("\n" + "=" * 60)
         print("Training complete!")
-        print(f"Best Val Loss: {self.best_val_loss:.4f}")
+        print(f"Best Harmonic F1: {self.best_harmonic_f1:.4f}")
+        print(f"Best Q8 F1: {self.best_q8_f1:.4f}")
         print(f"Best Q8 Accuracy: {self.best_q8_accuracy:.4f}")
+        print(f"Best Val Loss: {self.best_val_loss:.4f}")
         
         return self.history
+    
+    def _push_to_hub(self):
+        """Push the best model to HuggingFace Hub."""
+        try:
+            from .hub import push_model_to_hub
+            
+            # Load best model weights
+            best_checkpoint = self.checkpoint_dir / 'best_model.pt'
+            if best_checkpoint.exists():
+                checkpoint = torch.load(best_checkpoint, map_location='cpu', weights_only=False)
+                self.model.load_state_dict(checkpoint['model_state_dict'])
+            
+            # Prepare metrics for commit message
+            metrics = {
+                'q8_accuracy': self.best_q8_accuracy,
+                'q8_f1': self.best_q8_f1,
+                'val_loss': self.best_val_loss,
+            }
+            
+            push_model_to_hub(
+                model=self.model,
+                repo_id=self.hub_model_id,
+                config=self.training_config,
+                metrics=metrics,
+                checkpoint_path=str(self.checkpoint_dir),
+            )
+        except Exception as e:
+            print(f"⚠ Failed to push to Hub: {e}")
 
 
 # =============================================================================
@@ -472,7 +594,13 @@ def plot_training_history(history: Dict, save_path: Optional[str] = None):
     """Plot training history curves."""
     import matplotlib.pyplot as plt
     
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    # Check if F1 scores are available
+    has_f1 = 'q8_f1' in history and len(history['q8_f1']) > 0
+    
+    if has_f1:
+        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    else:
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     
     # Loss curves
     axes[0, 0].plot(history['train_loss'], label='Train')
@@ -492,6 +620,16 @@ def plot_training_history(history: Dict, save_path: Optional[str] = None):
     axes[0, 1].legend()
     axes[0, 1].grid(True, alpha=0.3)
     
+    # F1 curves (if available)
+    if has_f1:
+        axes[0, 2].plot(history['q8_f1'], label='Q8 Macro F1')
+        axes[0, 2].plot(history['q3_f1'], label='Q3 Macro F1')
+        axes[0, 2].set_xlabel('Epoch')
+        axes[0, 2].set_ylabel('Macro F1')
+        axes[0, 2].set_title('Q8 & Q3 Macro F1')
+        axes[0, 2].legend()
+        axes[0, 2].grid(True, alpha=0.3)
+    
     # Learning rate
     axes[1, 0].plot(history['learning_rate'])
     axes[1, 0].set_xlabel('Epoch')
@@ -500,16 +638,49 @@ def plot_training_history(history: Dict, save_path: Optional[str] = None):
     axes[1, 0].grid(True, alpha=0.3)
     
     # Final metrics bar
-    final_metrics = {
-        'Q8 Accuracy': history['q8_accuracy'][-1],
-        'Q3 Accuracy': history['q3_accuracy'][-1],
-    }
-    axes[1, 1].bar(final_metrics.keys(), final_metrics.values(), color=['steelblue', 'coral'])
-    axes[1, 1].set_ylabel('Accuracy')
+    if has_f1:
+        final_metrics = {
+            'Q8 Acc': history['q8_accuracy'][-1],
+            'Q3 Acc': history['q3_accuracy'][-1],
+            'Q8 F1': history['q8_f1'][-1],
+            'Q3 F1': history['q3_f1'][-1],
+        }
+        colors = ['steelblue', 'coral', 'seagreen', 'mediumpurple']
+    else:
+        final_metrics = {
+            'Q8 Accuracy': history['q8_accuracy'][-1],
+            'Q3 Accuracy': history['q3_accuracy'][-1],
+        }
+        colors = ['steelblue', 'coral']
+    
+    axes[1, 1].bar(final_metrics.keys(), final_metrics.values(), color=colors)
+    axes[1, 1].set_ylabel('Score')
     axes[1, 1].set_title('Final Validation Metrics')
     axes[1, 1].set_ylim(0, 1)
     for i, (k, v) in enumerate(final_metrics.items()):
         axes[1, 1].text(i, v + 0.02, f'{v:.4f}', ha='center')
+    
+    # Best metrics (if F1 available, use the extra subplot)
+    if has_f1:
+        # Hide or repurpose the last subplot
+        axes[1, 2].axis('off')
+        
+        # Add text summary
+        best_q8_acc = max(history['q8_accuracy'])
+        best_q3_acc = max(history['q3_accuracy'])
+        best_q8_f1 = max(history['q8_f1'])
+        best_q3_f1 = max(history['q3_f1'])
+        
+        summary_text = (
+            f"Best Metrics:\n\n"
+            f"Q8 Accuracy: {best_q8_acc:.4f}\n"
+            f"Q3 Accuracy: {best_q3_acc:.4f}\n"
+            f"Q8 Macro F1: {best_q8_f1:.4f}\n"
+            f"Q3 Macro F1: {best_q3_f1:.4f}\n"
+        )
+        axes[1, 2].text(0.5, 0.5, summary_text, transform=axes[1, 2].transAxes,
+                        fontsize=14, verticalalignment='center', horizontalalignment='center',
+                        bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.5))
     
     plt.tight_layout()
     
@@ -517,3 +688,4 @@ def plot_training_history(history: Dict, save_path: Optional[str] = None):
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
     
     return fig
+

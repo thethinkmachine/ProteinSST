@@ -170,23 +170,71 @@ if USE_PRECOMPUTED:
     )
     
 else:
-    # On-the-fly embedding extraction (slower but works without pre-computation)
+    # On-the-fly embedding extraction using OnTheFlyPLMDataset
     print("Using on-the-fly embedding extraction...")
-    print("This is slower. Pre-compute embeddings for faster training.")
+    print("⚠️  This is slower. Pre-compute embeddings for faster training.")
     
-    # Import transformers
     from transformers import EsmTokenizer, EsmModel
+    from src.data import OnTheFlyPLMDataset
+    import pandas as pd
     
     # Load ESM-2 model
     ESM_MODEL = "facebook/esm2_t33_650M_UR50D"
+    print(f"Loading {ESM_MODEL}...")
     tokenizer = EsmTokenizer.from_pretrained(ESM_MODEL)
     esm_model = EsmModel.from_pretrained(ESM_MODEL)
     esm_model = esm_model.to(DEVICE)
     esm_model.eval()
+    print(f"✅ ESM-2 loaded")
     
-    # Custom dataset that extracts embeddings on-the-fly
-    # (Implementation would go here - using pre-computed is recommended)
-    raise NotImplementedError("Please extract embeddings first using scripts/extract_embeddings.py")
+    # Load and split data
+    train_df = pd.read_csv('../../data/train.csv')
+    train_df = train_df[~train_df['id'].isin(LEAKAGE_TRAIN_IDS)].reset_index(drop=True)
+    
+    np.random.seed(SEED)
+    val_size = int(len(train_df) * 0.1)
+    val_indices = np.random.choice(len(train_df), val_size, replace=False)
+    train_indices = [i for i in range(len(train_df)) if i not in val_indices]
+    
+    train_split = train_df.iloc[train_indices].reset_index(drop=True)
+    val_split = train_df.iloc[val_indices].reset_index(drop=True)
+    
+    train_split.to_csv('/tmp/plm_train.csv', index=False)
+    val_split.to_csv('/tmp/plm_val.csv', index=False)
+    
+    # Create on-the-fly datasets
+    train_dataset = OnTheFlyPLMDataset(
+        '/tmp/plm_train.csv',
+        esm_model=esm_model,
+        tokenizer=tokenizer,
+        device=DEVICE,
+        max_length=config.max_seq_length,
+    )
+    
+    val_dataset = OnTheFlyPLMDataset(
+        '/tmp/plm_val.csv',
+        esm_model=esm_model,
+        tokenizer=tokenizer,
+        device=DEVICE,
+        max_length=config.max_seq_length,
+    )
+    
+    # Use smaller batch size due to on-the-fly extraction
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=max(1, config.batch_size // 4),  # Smaller batch
+        shuffle=True,
+        collate_fn=collate_fn,
+        num_workers=0,  # No multiprocessing with GPU model
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=max(1, config.batch_size // 4),
+        shuffle=False,
+        collate_fn=collate_fn,
+        num_workers=0,
+    )
 
 print(f"Train batches: {len(train_loader)}")
 print(f"Val batches: {len(val_loader)}")

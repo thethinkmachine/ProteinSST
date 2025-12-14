@@ -13,6 +13,7 @@ __pycache__/
 *_history.json
 *_history.png
 *.ckpt
+*_matrix.png
 
 # Distribution / packaging
 .Python

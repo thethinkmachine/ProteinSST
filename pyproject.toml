@@ -4,4 +4,7 @@ version = "0.1.0"
 description = "End-to-end pipeline for protein structure prediction using deep learning"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "trackio>=0.1.0",
+    "huggingface-hub>=0.20.0",
+]

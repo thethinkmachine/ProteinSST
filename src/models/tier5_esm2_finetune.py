@@ -257,8 +257,6 @@ class ESM2Dataset(torch.utils.data.Dataset):
         }
         
         if not self.is_test:
-            from .tier1_cnn_bilstm import encode_sst8, encode_sst3
-            
             sst8 = row['sst8']
             sst3 = row['sst3']
             if len(sst8) > self.max_length:
@@ -266,7 +264,7 @@ class ESM2Dataset(torch.utils.data.Dataset):
                 sst8 = sst8[start:start + self.max_length]
                 sst3 = sst3[start:start + self.max_length]
             
-            # Import encoding functions
+            # Import encoding mappings from config
             from ..config import SST8_TO_IDX, SST3_TO_IDX
             
             result['sst8'] = torch.tensor([SST8_TO_IDX[c] for c in sst8])

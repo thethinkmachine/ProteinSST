@@ -273,6 +273,93 @@ class PLMEmbeddingDataset(Dataset):
         return result
 
 
+class OnTheFlyPLMDataset(Dataset):
+    """
+    Dataset that extracts ESM-2 embeddings on-the-fly.
+    
+    Slower than using pre-computed embeddings, but works without extraction step.
+    
+    Args:
+        csv_path: Path to CSV file
+        esm_model: Loaded ESM-2 model
+        tokenizer: ESM-2 tokenizer
+        device: Device for model inference
+        max_length: Maximum sequence length
+        exclude_ids: IDs to exclude
+        is_test: If True, expects only sequence data
+    """
+    
+    def __init__(
+        self,
+        csv_path: str,
+        esm_model,
+        tokenizer,
+        device: str = 'cuda',
+        max_length: int = 512,
+        exclude_ids: List[int] = None,
+        is_test: bool = False,
+    ):
+        self.df = pd.read_csv(csv_path)
+        self.esm_model = esm_model
+        self.tokenizer = tokenizer
+        self.device = device
+        self.max_length = max_length
+        self.is_test = is_test
+        
+        if exclude_ids:
+            self.df = self.df[~self.df['id'].isin(exclude_ids)].reset_index(drop=True)
+    
+    def __len__(self) -> int:
+        return len(self.df)
+    
+    @torch.no_grad()
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        row = self.df.iloc[idx]
+        seq = row['seq']
+        
+        # Truncate if needed
+        if len(seq) > self.max_length:
+            start = (len(seq) - self.max_length) // 2
+            seq = seq[start:start + self.max_length]
+        
+        # Tokenize and extract embedding
+        encoding = self.tokenizer(
+            seq,
+            return_tensors='pt',
+            padding=False,
+            truncation=True,
+            max_length=self.max_length + 2,
+        )
+        
+        input_ids = encoding['input_ids'].to(self.device)
+        attention_mask = encoding['attention_mask'].to(self.device)
+        
+        # Forward pass through ESM-2
+        outputs = self.esm_model(input_ids=input_ids, attention_mask=attention_mask)
+        embedding = outputs.last_hidden_state.squeeze(0).cpu()  # (seq_len, hidden)
+        
+        # Remove special tokens (BOS and EOS)
+        embedding = embedding[1:-1, :]
+        
+        result = {
+            'id': row['id'],
+            'features': embedding,
+            'length': embedding.shape[0],
+        }
+        
+        if not self.is_test:
+            sst8 = row['sst8']
+            sst3 = row['sst3']
+            if len(sst8) > self.max_length:
+                start = (len(sst8) - self.max_length) // 2
+                sst8 = sst8[start:start + self.max_length]
+                sst3 = sst3[start:start + self.max_length]
+            result['sst8'] = encode_sst8(sst8)
+            result['sst3'] = encode_sst3(sst3)
+        
+        return result
+
+
 # =============================================================================
 # Collate Functions
 # =============================================================================
@@ -339,7 +426,8 @@ def create_dataloaders(
     full_df['length_bin'] = pd.cut(full_df['seq'].str.len(), bins=10, labels=False)
     
     val_indices = full_df.groupby('length_bin', group_keys=False).apply(
-        lambda x: x.sample(frac=val_split, random_state=seed)
+        lambda x: x.sample(frac=val_split, random_state=seed),
+        include_groups=False,
     ).index.tolist()
     
     train_indices = [i for i in range(len(full_df)) if i not in val_indices]

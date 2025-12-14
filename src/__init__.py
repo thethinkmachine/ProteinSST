@@ -7,5 +7,6 @@ from . import losses
 from . import augmentation
 from . import metrics
 from . import training
+from . import hub
 
 __version__ = "0.1.0"
