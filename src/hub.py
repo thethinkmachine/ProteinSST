@@ -500,6 +500,23 @@ onehot = one_hot_encode(sequence)  # (L, 20)
 blosum = get_blosum62_features(sequence)  # (L, 20)
 features = torch.cat([onehot, blosum], dim=-1)  # (L, 40)""",
         }
+    elif 'brnn' in name_lower or 'tier0' in name_lower:
+        return {
+            'architecture': 'CNN + BiRNN (Vanilla)',
+            'description': 'Baseline architecture using multi-scale CNN with vanilla bidirectional RNN (without LSTM gating).',
+            'features': """- Multi-scale 1D CNN (kernels: 3, 5, 7)
+- 2-layer Bidirectional vanilla RNN (512 hidden units)
+- Simpler and faster than BiLSTM
+- Serves as baseline for LSTM comparison""",
+            'q3_range': '80-83%',
+            'q8_range': '68-72%',
+            'class_name': 'CNNBRNN',
+            'import_statement': 'from src.models.tier0_cnn_brnn import CNNBRNN',
+            'input_prep': """# One-hot + BLOSUM62 encoding
+onehot = one_hot_encode(sequence)  # (L, 20)
+blosum = get_blosum62_features(sequence)  # (L, 20)
+features = torch.cat([onehot, blosum], dim=-1)  # (L, 40)""",
+        }
     else:  # Default to Tier 1
         return {
             'architecture': 'CNN + BiLSTM',
@@ -517,3 +534,4 @@ onehot = one_hot_encode(sequence)  # (L, 20)
 blosum = get_blosum62_features(sequence)  # (L, 20)
 features = torch.cat([onehot, blosum], dim=-1)  # (L, 40)""",
         }
+

@@ -173,6 +173,30 @@ class TrainingConfig:
 
 
 @dataclass
+class Tier0Config(TrainingConfig):
+    """Tier 0: CNN + BRNN (vanilla RNN) configuration."""
+    model_name: str = 'tier0_cnn_brnn'
+    
+    # Model architecture
+    input_dim: int = 20  # One-hot
+    use_blosum: bool = True  # Add BLOSUM62 features
+    
+    # CNN
+    cnn_filters: int = 64
+    cnn_kernels: List[int] = field(default_factory=lambda: [3, 5, 7])
+    
+    # BiRNN (vanilla RNN)
+    rnn_hidden: int = 256
+    rnn_layers: int = 2
+    rnn_dropout: float = 0.3
+    rnn_nonlinearity: str = 'tanh'  # 'tanh' or 'relu'
+    
+    # Output
+    fc_hidden: int = 256
+    fc_dropout: float = 0.2
+
+
+@dataclass
 class Tier1Config(TrainingConfig):
     """Tier 1: CNN + BiLSTM configuration."""
     model_name: str = 'tier1_cnn_bilstm'
