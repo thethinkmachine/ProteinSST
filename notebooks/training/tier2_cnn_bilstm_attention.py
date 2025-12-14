@@ -189,6 +189,7 @@ trainer = Trainer(
     gradient_clip=config.gradient_clip,
     use_amp=torch.cuda.is_available(),
     use_tracking=True,
+    trackio_space_id='thethinkmachine/trackio',  # HuggingFace Space for logs
     experiment_name='tier2_cnn_bilstm_attention',
     hub_model_id='thethinkmachine/ProteinSST-CNNBiLSTM-Attention',
     training_config=config,

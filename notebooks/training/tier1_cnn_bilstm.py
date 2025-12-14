@@ -206,6 +206,7 @@ trainer = Trainer(
     log_every=100,
     use_amp=torch.cuda.is_available(),  # Use FP16 on GPU
     use_tracking=True,
+    trackio_space_id='thethinkmachine/trackio',  # HuggingFace Space for logs
     experiment_name='tier1_cnn_bilstm',
     hub_model_id='thethinkmachine/ProteinSST-CNNBiLSTM',
     training_config=config,

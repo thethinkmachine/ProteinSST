@@ -345,6 +345,7 @@ trainer = ESM2Trainer(
     gradient_clip=config.gradient_clip,
     use_amp=torch.cuda.is_available(),
     use_tracking=True,
+    trackio_space_id='thethinkmachine/trackio',  # HuggingFace Space for logs
     experiment_name='tier5_finetuned_esm2',
     hub_model_id='thethinkmachine/ProteinSST-ESM2',
     training_config=config,

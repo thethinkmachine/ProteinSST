@@ -96,6 +96,7 @@ class Trainer:
         use_amp: Use automatic mixed precision (FP16)
         use_tracking: Use Weights & Biases/Trackio for tracking
         experiment_name: Name of the experiment
+        trackio_space_id: HuggingFace Space ID for remote tracking (e.g., 'username/trackio')
         hub_model_id: HuggingFace model ID for pushing to Hub
         training_config: Training configuration for model card
     """
@@ -116,6 +117,7 @@ class Trainer:
         # Tracking & Hub
         use_tracking: bool = False,
         experiment_name: str = 'protein_sst',
+        trackio_space_id: Optional[str] = None,
         hub_model_id: Optional[str] = None,
         training_config: Optional[Dict] = None,
     ):
@@ -134,6 +136,7 @@ class Trainer:
         # Tracking & Hub
         self.use_tracking = use_tracking
         self.experiment_name = experiment_name
+        self.trackio_space_id = trackio_space_id
         self.hub_model_id = hub_model_id
         self.training_config = training_config or {}
         self._tracker = None  # Initialized in train()
@@ -373,11 +376,20 @@ class Trainer:
             try:
                 import trackio as wandb
                 self._tracker = wandb
-                wandb.init(
-                    project=self.experiment_name,
-                    config=self.training_config,
-                )
-                print("✓ Experiment tracking enabled (Trackio/W&B)")
+                
+                # Pass space_id for remote tracking on HuggingFace Spaces
+                init_kwargs = {
+                    'project': self.experiment_name,
+                    'config': self.training_config,
+                }
+                if self.trackio_space_id:
+                    init_kwargs['space_id'] = self.trackio_space_id
+                    print(f"📊 Logging to HuggingFace Space: {self.trackio_space_id}")
+                else:
+                    print("📊 Logging locally (use trackio_space_id for remote logging)")
+                
+                wandb.init(**init_kwargs)
+                print("✓ Experiment tracking enabled (Trackio)")
             except ImportError:
                 print("⚠ trackio not installed. Install with: pip install trackio")
                 self.use_tracking = False
