@@ -94,6 +94,10 @@ class Trainer:
         gradient_clip: Maximum gradient norm
         log_every: Log training metrics every N batches
         use_amp: Use automatic mixed precision (FP16)
+        use_tracking: Use Weights & Biases/Trackio for tracking
+        experiment_name: Name of the experiment
+        hub_model_id: HuggingFace model ID for pushing to Hub
+        training_config: Training configuration for model card
     """
     
     def __init__(

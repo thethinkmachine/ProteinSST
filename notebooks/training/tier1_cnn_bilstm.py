@@ -205,6 +205,10 @@ trainer = Trainer(
     gradient_clip=config.gradient_clip,
     log_every=100,
     use_amp=torch.cuda.is_available(),  # Use FP16 on GPU
+    use_tracking=True,
+    experiment_name='tier1_cnn_bilstm',
+    hub_model_id='thethinkmachine/ProteinSST-CNNBiLSTM',
+    training_config=config,
 )
 
 # %%

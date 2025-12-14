@@ -344,6 +344,10 @@ trainer = ESM2Trainer(
     checkpoint_dir=config.checkpoint_dir,
     gradient_clip=config.gradient_clip,
     use_amp=torch.cuda.is_available(),
+    use_tracking=True,
+    experiment_name='tier5_finetuned_esm2',
+    hub_model_id='thethinkmachine/ProteinSST-ESM2',
+    training_config=config,
 )
 
 # %%

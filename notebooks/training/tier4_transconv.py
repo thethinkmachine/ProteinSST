@@ -214,6 +214,10 @@ trainer = Trainer(
     checkpoint_dir=config.checkpoint_dir,
     gradient_clip=config.gradient_clip,
     use_amp=torch.cuda.is_available(),
+    use_tracking=True,
+    experiment_name='tier4_transconv',
+    hub_model_id='thethinkmachine/ProteinSST-TransConv',
+    training_config=config,
 )
 
 # %%

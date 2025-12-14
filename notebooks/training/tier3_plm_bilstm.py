@@ -301,6 +301,10 @@ trainer = Trainer(
     checkpoint_dir=config.checkpoint_dir,
     gradient_clip=config.gradient_clip,
     use_amp=torch.cuda.is_available(),
+    use_tracking=True,
+    experiment_name='tier3_plm_bilstm',
+    hub_model_id='thethinkmachine/ProteinSST-PLMBiLSTM',
+    training_config=config,
 )
 
 # %%
