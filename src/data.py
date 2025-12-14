@@ -249,24 +249,34 @@ class PLMEmbeddingDataset(Dataset):
         emb_path = self.embeddings_dir / f"{sample_id}.pt"
         embedding = torch.load(emb_path)  # Shape: (seq_len, embed_dim)
         
-        # Truncate if needed
+        # Track truncation for consistent label handling
+        truncate_start = 0
         if embedding.shape[0] > self.max_length:
-            start = (embedding.shape[0] - self.max_length) // 2
-            embedding = embedding[start:start + self.max_length]
+            truncate_start = (embedding.shape[0] - self.max_length) // 2
+            embedding = embedding[truncate_start:truncate_start + self.max_length]
+        
+        emb_len = embedding.shape[0]
         
         result = {
             'id': sample_id,
             'features': embedding,
-            'length': embedding.shape[0],
+            'length': emb_len,
         }
         
         if not self.is_test:
             sst8 = row['sst8']
             sst3 = row['sst3']
-            if len(sst8) > self.max_length:
-                start = (len(sst8) - self.max_length) // 2
+            
+            # Apply same truncation as embedding
+            if truncate_start > 0 or len(sst8) > self.max_length:
+                start = truncate_start if truncate_start > 0 else (len(sst8) - self.max_length) // 2
                 sst8 = sst8[start:start + self.max_length]
                 sst3 = sst3[start:start + self.max_length]
+            
+            # Ensure labels match embedding length exactly
+            sst8 = sst8[:emb_len]
+            sst3 = sst3[:emb_len]
+            
             result['sst8'] = encode_sst8(sst8)
             result['sst3'] = encode_sst3(sst3)
         
@@ -317,10 +327,15 @@ class OnTheFlyPLMDataset(Dataset):
         row = self.df.iloc[idx]
         seq = row['seq']
         
-        # Truncate if needed
+        # Keep original labels before any truncation
+        sst8_orig = row['sst8'] if not self.is_test else None
+        sst3_orig = row['sst3'] if not self.is_test else None
+        
+        # Truncate sequence if needed
+        truncate_start = 0
         if len(seq) > self.max_length:
-            start = (len(seq) - self.max_length) // 2
-            seq = seq[start:start + self.max_length]
+            truncate_start = (len(seq) - self.max_length) // 2
+            seq = seq[truncate_start:truncate_start + self.max_length]
         
         # Tokenize and extract embedding
         encoding = self.tokenizer(
@@ -341,19 +356,24 @@ class OnTheFlyPLMDataset(Dataset):
         # Remove special tokens (BOS and EOS)
         embedding = embedding[1:-1, :]
         
+        # Get the actual embedding length (may differ slightly from seq length)
+        emb_len = embedding.shape[0]
+        
         result = {
             'id': row['id'],
             'features': embedding,
-            'length': embedding.shape[0],
+            'length': emb_len,
         }
         
         if not self.is_test:
-            sst8 = row['sst8']
-            sst3 = row['sst3']
-            if len(sst8) > self.max_length:
-                start = (len(sst8) - self.max_length) // 2
-                sst8 = sst8[start:start + self.max_length]
-                sst3 = sst3[start:start + self.max_length]
+            # Truncate labels to match the EXACT embedding length
+            sst8 = sst8_orig[truncate_start:truncate_start + self.max_length]
+            sst3 = sst3_orig[truncate_start:truncate_start + self.max_length]
+            
+            # Ensure labels match embedding length exactly
+            sst8 = sst8[:emb_len]
+            sst3 = sst3[:emb_len]
+            
             result['sst8'] = encode_sst8(sst8)
             result['sst3'] = encode_sst3(sst3)
         
