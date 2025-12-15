@@ -212,7 +212,7 @@ class ProteinDataset(Dataset):
 
 class PLMEmbeddingDataset(Dataset):
     """
-    Dataset using pre-computed PLM embeddings.
+    Dataset using pre-computed PLM embeddings (legacy .pt files).
     
     Args:
         csv_path: Path to CSV file with metadata
@@ -281,6 +281,114 @@ class PLMEmbeddingDataset(Dataset):
             result['sst3'] = encode_sst3(sst3)
         
         return result
+
+
+class HDF5EmbeddingDataset(Dataset):
+    """
+    Dataset using pre-computed PLM embeddings from HDF5 file.
+    
+    This is the preferred method for loading embeddings as it reduces
+    I/O overhead by storing all embeddings in a single file.
+    
+    Args:
+        csv_path: Path to CSV file with metadata
+        h5_path: Path to HDF5 file containing embeddings
+        dataset_name: Name of dataset group in HDF5 ('train' or 'cb513')
+        max_length: Maximum sequence length
+        exclude_ids: IDs to exclude
+        is_test: If True, expects only sequence data
+    """
+    
+    def __init__(
+        self,
+        csv_path: str,
+        h5_path: str,
+        dataset_name: str = 'train',
+        max_length: int = 512,
+        exclude_ids: List[int] = None,
+        is_test: bool = False,
+    ):
+        import h5py
+        
+        self.df = pd.read_csv(csv_path)
+        self.h5_path = h5_path
+        self.dataset_name = dataset_name
+        self.max_length = max_length
+        self.is_test = is_test
+        
+        if exclude_ids:
+            self.df = self.df[~self.df['id'].isin(exclude_ids)].reset_index(drop=True)
+        
+        # Open HDF5 file and get embedding dimension
+        with h5py.File(h5_path, 'r') as f:
+            self.embedding_dim = f.attrs.get('embedding_dim', None)
+            # Verify dataset exists
+            if dataset_name not in f:
+                raise ValueError(f"Dataset '{dataset_name}' not found in {h5_path}")
+        
+        # Keep HDF5 file handle as None - will open per-worker
+        self._h5_file = None
+    
+    def _get_h5_file(self):
+        """Get or open HDF5 file handle (thread-safe for DataLoader workers)."""
+        if self._h5_file is None:
+            import h5py
+            self._h5_file = h5py.File(self.h5_path, 'r')
+        return self._h5_file
+    
+    def __len__(self) -> int:
+        return len(self.df)
+    
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        row = self.df.iloc[idx]
+        sample_id = str(row['id'])
+        
+        # Load embedding from HDF5
+        h5_file = self._get_h5_file()
+        grp = h5_file[self.dataset_name]
+        
+        if sample_id not in grp:
+            raise KeyError(f"Embedding for ID '{sample_id}' not found in {self.dataset_name}")
+        
+        embedding = torch.from_numpy(grp[sample_id][:].astype(np.float32))
+        
+        # Track truncation for consistent label handling
+        truncate_start = 0
+        if embedding.shape[0] > self.max_length:
+            truncate_start = (embedding.shape[0] - self.max_length) // 2
+            embedding = embedding[truncate_start:truncate_start + self.max_length]
+        
+        emb_len = embedding.shape[0]
+        
+        result = {
+            'id': row['id'],
+            'features': embedding,
+            'length': emb_len,
+        }
+        
+        if not self.is_test:
+            sst8 = row['sst8']
+            sst3 = row['sst3']
+            
+            # Apply same truncation as embedding
+            if truncate_start > 0 or len(sst8) > self.max_length:
+                start = truncate_start if truncate_start > 0 else (len(sst8) - self.max_length) // 2
+                sst8 = sst8[start:start + self.max_length]
+                sst3 = sst3[start:start + self.max_length]
+            
+            # Ensure labels match embedding length exactly
+            sst8 = sst8[:emb_len]
+            sst3 = sst3[:emb_len]
+            
+            result['sst8'] = encode_sst8(sst8)
+            result['sst3'] = encode_sst3(sst3)
+        
+        return result
+    
+    def __del__(self):
+        """Close HDF5 file handle on cleanup."""
+        if self._h5_file is not None:
+            self._h5_file.close()
 
 
 class OnTheFlyPLMDataset(Dataset):

@@ -1,38 +1,46 @@
 #!/usr/bin/env python3
 """
-Extract ESM-2 embeddings for all protein sequences.
+Extract PLM embeddings for all protein sequences.
 
-This script pre-computes embeddings for faster training in Tier 3-5.
-Run this once before training PLM-based models.
+Supports multiple PLMs: Ankh, ESM-2, ProtBert
+Outputs embeddings to a single HDF5 file for efficient storage.
 
 Usage:
-    python scripts/extract_embeddings.py --model esm2_t33_650M --batch_size 4
+    python scripts/extract_embeddings.py --plm ankh_base --output data/embeddings/ankh_base.h5
+    python scripts/extract_embeddings.py --plm esm2_650m --output data/embeddings/esm2_650m.h5
+    python scripts/extract_embeddings.py --plm protbert --output data/embeddings/protbert.h5
 """
 
 import argparse
-import torch
+import sys
 from pathlib import Path
-from tqdm import tqdm
+
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import torch
+import h5py
+import numpy as np
 import pandas as pd
-from transformers import EsmTokenizer, EsmModel
+from tqdm import tqdm
 
-
-# Model options
-ESM_MODELS = {
-    'esm2_t6_8M': 'facebook/esm2_t6_8M_UR50D',      # 8M params (fastest)
-    'esm2_t12_35M': 'facebook/esm2_t12_35M_UR50D',   # 35M params
-    'esm2_t33_650M': 'facebook/esm2_t33_650M_UR50D', # 650M params (best)
-}
+from src.plm_registry import (
+    PLM_REGISTRY, 
+    get_plm_info, 
+    load_plm, 
+    extract_embeddings,
+    list_plms,
+)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Extract ESM-2 embeddings')
+    parser = argparse.ArgumentParser(description='Extract PLM embeddings to HDF5')
     parser.add_argument(
-        '--model', 
-        type=str, 
-        default='esm2_t33_650M',
-        choices=list(ESM_MODELS.keys()),
-        help='ESM-2 model to use'
+        '--plm',
+        type=str,
+        default='ankh_base',
+        choices=list(PLM_REGISTRY.keys()),
+        help='PLM to use for embedding extraction'
     )
     parser.add_argument(
         '--train_csv',
@@ -41,22 +49,22 @@ def parse_args():
         help='Path to training CSV'
     )
     parser.add_argument(
-        '--test_csv',
+        '--cb513_csv',
         type=str,
-        default='data/test.csv',
-        help='Path to test CSV'
+        default='data/cb513.csv',
+        help='Path to CB513 test CSV'
     )
     parser.add_argument(
-        '--output_dir',
+        '--output',
         type=str,
-        default='data/embeddings',
-        help='Output directory for embeddings'
+        default=None,
+        help='Output HDF5 file path (default: data/embeddings/{plm}.h5)'
     )
     parser.add_argument(
         '--batch_size',
         type=int,
-        default=4,
-        help='Batch size for extraction'
+        default=1,
+        help='Batch size for extraction (1 recommended for variable lengths)'
     )
     parser.add_argument(
         '--max_length',
@@ -70,70 +78,88 @@ def parse_args():
         default='auto',
         help='Device to use (auto, cuda, cpu)'
     )
+    parser.add_argument(
+        '--list_plms',
+        action='store_true',
+        help='List available PLMs and exit'
+    )
     return parser.parse_args()
 
 
-@torch.no_grad()
-def extract_embeddings(
-    sequences: list,
-    ids: list,
-    model: EsmModel,
-    tokenizer: EsmTokenizer,
-    output_dir: Path,
-    batch_size: int = 4,
+def extract_to_hdf5(
+    model,
+    tokenizer,
+    plm_info,
+    df: pd.DataFrame,
+    output_path: Path,
     max_length: int = 1024,
     device: str = 'cuda',
+    dataset_name: str = 'train',
 ):
-    """Extract and save embeddings for all sequences."""
+    """Extract embeddings for all sequences in a dataframe and save to HDF5."""
     
-    model.eval()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    sequences = df['seq'].tolist()
+    ids = df['id'].tolist()
     
-    # Process in batches
-    num_batches = (len(sequences) + batch_size - 1) // batch_size
-    
-    for i in tqdm(range(num_batches), desc='Extracting embeddings'):
-        batch_start = i * batch_size
-        batch_end = min((i + 1) * batch_size, len(sequences))
+    # Open HDF5 file in append mode
+    with h5py.File(output_path, 'a') as f:
+        # Create group for this dataset if it doesn't exist
+        if dataset_name not in f:
+            grp = f.create_group(dataset_name)
+        else:
+            grp = f[dataset_name]
         
-        batch_seqs = sequences[batch_start:batch_end]
-        batch_ids = ids[batch_start:batch_end]
+        # Store metadata
+        if 'plm_name' not in f.attrs:
+            f.attrs['plm_name'] = plm_info.model_id
+            f.attrs['embedding_dim'] = plm_info.embedding_dim
+            f.attrs['model_type'] = plm_info.model_type
         
-        # Skip already processed
-        all_exist = all((output_dir / f"{id_}.pt").exists() for id_ in batch_ids)
-        if all_exist:
-            continue
-        
-        # Tokenize
-        encoding = tokenizer(
-            batch_seqs,
-            return_tensors='pt',
-            padding=True,
-            truncation=True,
-            max_length=max_length,
-        )
-        
-        input_ids = encoding['input_ids'].to(device)
-        attention_mask = encoding['attention_mask'].to(device)
-        
-        # Forward pass
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-        hidden_states = outputs.last_hidden_state  # (batch, seq_len, hidden)
-        
-        # Save each sequence's embedding
-        for j, (seq_id, seq) in enumerate(zip(batch_ids, batch_seqs)):
-            # Get actual length (excluding padding and special tokens)
-            seq_len = min(len(seq), max_length - 2)  # -2 for BOS/EOS
+        for i, (seq_id, seq) in enumerate(tqdm(
+            zip(ids, sequences), 
+            total=len(sequences),
+            desc=f'Extracting {dataset_name}'
+        )):
+            seq_id_str = str(seq_id)
             
-            # Extract embedding (remove BOS and EOS)
-            embedding = hidden_states[j, 1:seq_len+1, :].cpu()
+            # Skip if already exists
+            if seq_id_str in grp:
+                continue
             
-            # Save
-            torch.save(embedding, output_dir / f"{seq_id}.pt")
+            # Extract embedding
+            embeddings = extract_embeddings(
+                model=model,
+                tokenizer=tokenizer,
+                sequences=[seq],
+                plm_type=plm_info.model_type,
+                device=device,
+                max_length=max_length,
+            )
+            
+            emb = embeddings[0].numpy().astype(np.float16)  # Save as float16 to reduce size
+            
+            # Store in HDF5
+            grp.create_dataset(
+                seq_id_str,
+                data=emb,
+                compression='gzip',
+                compression_opts=4,
+            )
+        
+        # Store ID list for this dataset
+        if f'{dataset_name}_ids' not in f:
+            f.create_dataset(
+                f'{dataset_name}_ids',
+                data=np.array([str(i) for i in ids], dtype='S20'),
+            )
 
 
 def main():
     args = parse_args()
+    
+    if args.list_plms:
+        list_plms()
+        return
     
     # Device setup
     if args.device == 'auto':
@@ -141,63 +167,85 @@ def main():
     else:
         device = args.device
     
+    # Get PLM info
+    plm_info = get_plm_info(args.plm)
+    
+    print("=" * 60)
+    print(f"PLM Embedding Extraction")
+    print("=" * 60)
+    print(f"PLM: {args.plm}")
+    print(f"Model: {plm_info.model_id}")
+    print(f"Embedding dim: {plm_info.embedding_dim}")
     print(f"Device: {device}")
-    print(f"Model: {args.model}")
+    print()
+    
+    # Output path
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        output_path = Path(f'data/embeddings/{args.plm}.h5')
+    
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Output: {output_path}")
+    print()
     
     # Load model
-    model_name = ESM_MODELS[args.model]
-    print(f"Loading {model_name}...")
-    
-    tokenizer = EsmTokenizer.from_pretrained(model_name)
-    model = EsmModel.from_pretrained(model_name)
-    model = model.to(device)
-    model.eval()
-    
-    print(f"Model loaded with {sum(p.numel() for p in model.parameters()):,} parameters")
-    
-    # Output directory
-    output_dir = Path(args.output_dir)
+    print("Loading PLM...")
+    model, tokenizer = load_plm(args.plm, device=device)
+    print(f"Model loaded successfully!")
+    print()
     
     # Process train data
-    if Path(args.train_csv).exists():
-        print(f"\nProcessing training data from {args.train_csv}")
-        train_df = pd.read_csv(args.train_csv)
+    train_path = Path(args.train_csv)
+    if train_path.exists():
+        print(f"Processing training data from {train_path}")
+        train_df = pd.read_csv(train_path)
+        print(f"  Sequences: {len(train_df)}")
         
-        extract_embeddings(
-            sequences=train_df['seq'].tolist(),
-            ids=train_df['id'].tolist(),
+        extract_to_hdf5(
             model=model,
             tokenizer=tokenizer,
-            output_dir=output_dir,
-            batch_size=args.batch_size,
+            plm_info=plm_info,
+            df=train_df,
+            output_path=output_path,
             max_length=args.max_length,
             device=device,
+            dataset_name='train',
         )
     
-    # Process test data
-    if Path(args.test_csv).exists():
-        print(f"\nProcessing test data from {args.test_csv}")
-        test_df = pd.read_csv(args.test_csv)
+    # Process CB513 test data
+    cb513_path = Path(args.cb513_csv)
+    if cb513_path.exists():
+        print(f"\nProcessing CB513 test data from {cb513_path}")
+        cb513_df = pd.read_csv(cb513_path)
+        print(f"  Sequences: {len(cb513_df)}")
         
-        extract_embeddings(
-            sequences=test_df['seq'].tolist(),
-            ids=test_df['id'].tolist(),
+        extract_to_hdf5(
             model=model,
             tokenizer=tokenizer,
-            output_dir=output_dir,
-            batch_size=args.batch_size,
+            plm_info=plm_info,
+            df=cb513_df,
+            output_path=output_path,
             max_length=args.max_length,
             device=device,
+            dataset_name='cb513',
         )
     
     # Summary
-    num_files = len(list(output_dir.glob("*.pt")))
-    total_size = sum(f.stat().st_size for f in output_dir.glob("*.pt"))
+    with h5py.File(output_path, 'r') as f:
+        train_count = len(f['train']) if 'train' in f else 0
+        cb513_count = len(f['cb513']) if 'cb513' in f else 0
     
-    print(f"\n✅ Extraction complete!")
-    print(f"   Files: {num_files}")
-    print(f"   Total size: {total_size / 1e9:.2f} GB")
-    print(f"   Location: {output_dir.absolute()}")
+    file_size = output_path.stat().st_size / 1e9
+    
+    print()
+    print("=" * 60)
+    print(f"✅ Extraction complete!")
+    print(f"   Train embeddings: {train_count}")
+    print(f"   CB513 embeddings: {cb513_count}")
+    print(f"   File size: {file_size:.2f} GB")
+    print(f"   Location: {output_path.absolute()}")
+    print("=" * 60)
 
 
 if __name__ == '__main__':

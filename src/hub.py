@@ -428,110 +428,24 @@ This model is released under the GPL-3.0 License.
 
 
 def _get_tier_info(model_name: str, config: Optional[Dict]) -> Dict[str, str]:
-    """Get tier-specific information for model card."""
+    """Get model-specific information for model card."""
     
-    name_lower = model_name.lower()
-    
-    if 'esm' in name_lower or 'tier5' in name_lower:
-        return {
-            'architecture': 'Fine-tuned ESM-2',
-            'description': 'Fine-tuned ESM-2 protein language model with task-specific classification heads.',
-            'features': """- Pre-trained on 250M+ protein sequences
+    # Only ESM2FineTune is supported
+    return {
+        'architecture': 'Fine-tuned ESM-2',
+        'description': 'Fine-tuned ESM-2 protein language model with task-specific classification heads.',
+        'features': """- Pre-trained on 250M+ protein sequences
 - Gradient checkpointing for memory efficiency
 - Layer-wise learning rate decay
 - End-to-end differentiable""",
-            'q3_range': '91-93%',
-            'q8_range': '80-85%',
-            'class_name': 'ESM2FineTune',
-            'import_statement': 'from src.models.tier5_esm2_finetune import ESM2FineTune',
-            'input_prep': """# For ESM-2, use tokenizer
+        'q3_range': '91-93%',
+        'q8_range': '80-85%',
+        'class_name': 'ESM2FineTune',
+        'import_statement': 'from src.models.esm2_finetune import ESM2FineTune',
+        'input_prep': """# For ESM-2, use tokenizer
 from transformers import EsmTokenizer
 tokenizer = EsmTokenizer.from_pretrained("facebook/esm2_t33_650M_UR50D")
 encoding = tokenizer(sequence, return_tensors='pt')
 input_ids = encoding['input_ids']
 attention_mask = encoding['attention_mask']""",
-        }
-    elif 'transconv' in name_lower or 'tier4' in name_lower:
-        return {
-            'architecture': 'TransConv (Transformer + Dilated CNN)',
-            'description': 'Hybrid architecture combining Transformer self-attention for global context with dilated CNNs for multi-scale local features.',
-            'features': """- 4-layer Transformer encoder with 8 attention heads
-- Dilated CNN with rates [1, 2, 4, 8]
-- Feature fusion layer
-- Uses ESM-2 embeddings as input""",
-            'q3_range': '89-92%',
-            'q8_range': '78-83%',
-            'class_name': 'TransConv',
-            'import_statement': 'from src.models.tier4_transconv import TransConv',
-            'input_prep': """# Requires pre-computed ESM-2 embeddings
-embedding = torch.load(f"embeddings/{seq_id}.pt")  # (L, 1280)
-features = embedding""",
-        }
-    elif 'plm' in name_lower or 'tier3' in name_lower:
-        return {
-            'architecture': 'PLM Embeddings + BiLSTM',
-            'description': 'BiLSTM sequence model operating on pre-computed ESM-2 protein language model embeddings.',
-            'features': """- ESM-2 embeddings (1280-dim) as input
-- Optional CNN for local refinement
-- 2-layer BiLSTM (512 hidden units)
-- No MSA required""",
-            'q3_range': '88-91%',
-            'q8_range': '77-82%',
-            'class_name': 'PLMBiLSTM',
-            'import_statement': 'from src.models.tier3_plm_bilstm import PLMBiLSTM',
-            'input_prep': """# Requires pre-computed ESM-2 embeddings
-embedding = torch.load(f"embeddings/{seq_id}.pt")  # (L, 1280)
-features = embedding""",
-        }
-    elif 'attention' in name_lower or 'tier2' in name_lower:
-        return {
-            'architecture': 'CNN + BiLSTM + Multi-Head Attention',
-            'description': 'Enhanced architecture with multi-scale CNN, BiLSTM, and self-attention for capturing both local and global patterns.',
-            'features': """- Multi-scale 1D CNN (kernels: 3, 5, 7)
-- 2-layer BiLSTM (512 hidden units)
-- 8-head self-attention with residual connections
-- Positional encoding""",
-            'q3_range': '85-88%',
-            'q8_range': '75-78%',
-            'class_name': 'CNNBiLSTMAttention',
-            'import_statement': 'from src.models.tier2_cnn_bilstm_attention import CNNBiLSTMAttention',
-            'input_prep': """# One-hot + BLOSUM62 encoding
-onehot = one_hot_encode(sequence)  # (L, 20)
-blosum = get_blosum62_features(sequence)  # (L, 20)
-features = torch.cat([onehot, blosum], dim=-1)  # (L, 40)""",
-        }
-    elif 'brnn' in name_lower or 'tier0' in name_lower:
-        return {
-            'architecture': 'CNN + BiRNN (Vanilla)',
-            'description': 'Baseline architecture using multi-scale CNN with vanilla bidirectional RNN (without LSTM gating).',
-            'features': """- Multi-scale 1D CNN (kernels: 3, 5, 7)
-- 2-layer Bidirectional vanilla RNN (512 hidden units)
-- Simpler and faster than BiLSTM
-- Serves as baseline for LSTM comparison""",
-            'q3_range': '80-83%',
-            'q8_range': '68-72%',
-            'class_name': 'CNNBRNN',
-            'import_statement': 'from src.models.tier0_cnn_brnn import CNNBRNN',
-            'input_prep': """# One-hot + BLOSUM62 encoding
-onehot = one_hot_encode(sequence)  # (L, 20)
-blosum = get_blosum62_features(sequence)  # (L, 20)
-features = torch.cat([onehot, blosum], dim=-1)  # (L, 40)""",
-        }
-    else:  # Default to Tier 1
-        return {
-            'architecture': 'CNN + BiLSTM',
-            'description': 'Classic architecture combining multi-scale CNN for local feature extraction with BiLSTM for sequential modeling.',
-            'features': """- Multi-scale 1D CNN (kernels: 3, 5, 7)
-- 2-layer BiLSTM (512 hidden units)
-- Dual output heads for Q8 and Q3
-- ~2.8M trainable parameters""",
-            'q3_range': '82-85%',
-            'q8_range': '70-74%',
-            'class_name': 'CNNBiLSTM',
-            'import_statement': 'from src.models.tier1_cnn_bilstm import CNNBiLSTM',
-            'input_prep': """# One-hot + BLOSUM62 encoding
-onehot = one_hot_encode(sequence)  # (L, 20)
-blosum = get_blosum62_features(sequence)  # (L, 20)
-features = torch.cat([onehot, blosum], dim=-1)  # (L, 40)""",
-        }
-
+    }

@@ -91,6 +91,15 @@ SIMILAR_AA = {
 
 
 # =============================================================================
+# Data Paths
+# =============================================================================
+
+TRAIN_CSV_PATH = 'data/train.csv'
+CB513_PATH = 'data/cb513.csv'
+EMBEDDINGS_DIR = 'data/embeddings'
+
+
+# =============================================================================
 # Class Weights (from EDA - inverse frequency)
 # =============================================================================
 
@@ -117,7 +126,7 @@ SST3_WEIGHTS = torch.tensor([
 
 
 # =============================================================================
-# Training Configuration
+# Base Training Configuration
 # =============================================================================
 
 @dataclass
@@ -159,11 +168,11 @@ class TrainingConfig:
     
     # Logging & Tracking
     log_every: int = 100
-    use_tracking: bool = False  # Enable Trackio/W&B experiment tracking
+    use_tracking: bool = False
     experiment_name: str = 'protein_sst'
     
     # HuggingFace Hub
-    hub_model_id: Optional[str] = None  # e.g., "username/protein-sst-tier1"
+    hub_model_id: Optional[str] = None
     
     # Device
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -172,141 +181,164 @@ class TrainingConfig:
     seed: int = 42
 
 
-@dataclass
-class Tier0Config(TrainingConfig):
-    """Tier 0: CNN + BRNN (vanilla RNN) configuration."""
-    model_name: str = 'tier0_cnn_brnn'
-    
-    # Model architecture
-    input_dim: int = 20  # One-hot
-    use_blosum: bool = True  # Add BLOSUM62 features
-    
-    # CNN
-    cnn_filters: int = 64
-    cnn_kernels: List[int] = field(default_factory=lambda: [3, 5, 7])
-    
-    # BiRNN (vanilla RNN)
-    rnn_hidden: int = 256
-    rnn_layers: int = 2
-    rnn_dropout: float = 0.3
-    rnn_nonlinearity: str = 'tanh'  # 'tanh' or 'relu'
-    
-    # Output
-    fc_hidden: int = 256
-    fc_dropout: float = 0.2
+# =============================================================================
+# Component Configurations
+# =============================================================================
 
+@dataclass
+class PLMConfig:
+    """PLM embedding configuration."""
+    plm_name: str = 'ankh_base'  # 'ankh_base', 'ankh_large', 'esm2_35m', 'esm2_650m', 'protbert'
+    embeddings_path: str = 'data/embeddings'  # Path to HDF5 file or directory
+
+
+@dataclass
+class CNNConfig:
+    """CNN architecture configuration."""
+    cnn_type: str = 'multiscale'  # 'multiscale' or 'deep'
+    
+    # Multiscale params
+    kernel_sizes: List[int] = field(default_factory=lambda: [3, 5, 7, 11])
+    out_channels: int = 64
+    
+    # Deep params
+    num_layers: int = 4
+    dilations: List[int] = field(default_factory=lambda: [1, 2, 4, 8])
+    hidden_channels: int = 128
+    
+    # Common params
+    activation: str = 'relu'
+    batch_norm: bool = True
+    dropout: float = 0.0
+    residual: bool = True
+
+
+@dataclass
+class RNNConfig:
+    """RNN architecture configuration."""
+    rnn_type: str = 'lstm'  # 'lstm', 'gru', 'rnn'
+    hidden_size: int = 256
+    num_layers: int = 2
+    dropout: float = 0.3
+    bidirectional: bool = True
+
+
+@dataclass
+class HeadConfig:
+    """Classification head configuration."""
+    strategy: str = 'q3discarding'  # 'q3discarding' or 'q3guided'
+    fc_hidden: int = 256
+    fc_dropout: float = 0.1
+
+
+# =============================================================================
+# Tier-Specific Configurations
+# =============================================================================
 
 @dataclass
 class Tier1Config(TrainingConfig):
-    """Tier 1: CNN + BiLSTM configuration."""
-    model_name: str = 'tier1_cnn_bilstm'
+    """
+    Tier 1: Baseline configuration.
+    PLM Embeddings → FC → MTL Head
+    """
+    model_name: str = 'tier1_baseline'
     
-    # Model architecture
-    input_dim: int = 20  # One-hot
-    use_blosum: bool = True  # Add BLOSUM62 features
+    # PLM
+    plm_name: str = 'ankh_base'
+    embeddings_path: str = 'data/embeddings/ankh_base.h5'
     
-    # CNN
-    cnn_filters: int = 64
-    cnn_kernels: List[int] = field(default_factory=lambda: [3, 5, 7])
+    # FC layer
+    fc_hidden: int = 512
+    fc_dropout: float = 0.1
     
-    # BiLSTM
-    lstm_hidden: int = 256
-    lstm_layers: int = 2
-    lstm_dropout: float = 0.3
-    
-    # Output
-    fc_hidden: int = 256
-    fc_dropout: float = 0.2
+    # Head
+    head_strategy: str = 'q3discarding'
+    head_hidden: int = 256
+    head_dropout: float = 0.1
 
 
 @dataclass
 class Tier2Config(TrainingConfig):
-    """Tier 2: CNN + BiLSTM + Attention configuration."""
-    model_name: str = 'tier2_cnn_bilstm_attention'
+    """
+    Tier 2: CNN configuration.
+    PLM Embeddings → CNN → MTL Head
+    """
+    model_name: str = 'tier2_cnn'
     
-    # Inherits CNN and LSTM from Tier1
-    input_dim: int = 20
-    use_blosum: bool = True
-    use_positional: bool = True
+    # PLM
+    plm_name: str = 'ankh_base'
+    embeddings_path: str = 'data/embeddings/ankh_base.h5'
     
-    cnn_filters: int = 64
-    cnn_kernels: List[int] = field(default_factory=lambda: [3, 5, 7])
+    # CNN
+    cnn_type: str = 'multiscale'  # 'multiscale' or 'deep'
+    kernel_sizes: List[int] = field(default_factory=lambda: [3, 5, 7, 11])
+    cnn_out_channels: int = 64
+    cnn_num_layers: int = 4
+    cnn_dilations: List[int] = field(default_factory=lambda: [1, 2, 4, 8])
+    cnn_activation: str = 'relu'
+    cnn_dropout: float = 0.0
+    cnn_residual: bool = True
     
-    lstm_hidden: int = 256
-    lstm_layers: int = 2
-    lstm_dropout: float = 0.3
-    
-    # Attention
-    num_heads: int = 8
-    attention_dropout: float = 0.1
-    
-    fc_hidden: int = 256
-    fc_dropout: float = 0.2
+    # Head
+    head_strategy: str = 'q3discarding'
+    head_hidden: int = 256
+    head_dropout: float = 0.1
 
 
-@dataclass 
+@dataclass
 class Tier3Config(TrainingConfig):
-    """Tier 3: PLM (ESM-2) + BiLSTM configuration."""
-    model_name: str = 'tier3_plm_bilstm'
+    """
+    Tier 3: CNN + RNN configuration.
+    PLM Embeddings → CNN → BiLSTM/GRU/RNN → MTL Head
+    """
+    model_name: str = 'tier3_cnn_rnn'
     
-    # PLM embeddings (pre-computed)
-    embedding_dim: int = 1280  # ESM-2 650M
-    embeddings_path: str = 'data/embeddings'
+    # PLM
+    plm_name: str = 'ankh_base'
+    embeddings_path: str = 'data/embeddings/ankh_base.h5'
     
-    # Optional CNN
-    use_cnn: bool = True
-    cnn_filters: int = 128
-    cnn_kernels: List[int] = field(default_factory=lambda: [3, 5])
+    # CNN
+    cnn_type: str = 'multiscale'  # 'multiscale' or 'deep'
+    kernel_sizes: List[int] = field(default_factory=lambda: [3, 5, 7])
+    cnn_out_channels: int = 64
+    cnn_num_layers: int = 4
+    cnn_dilations: List[int] = field(default_factory=lambda: [1, 2, 4, 8])
+    cnn_activation: str = 'relu'
+    cnn_dropout: float = 0.0
+    cnn_residual: bool = True
     
-    # BiLSTM
-    lstm_hidden: int = 256
-    lstm_layers: int = 2
-    lstm_dropout: float = 0.2
+    # RNN
+    rnn_type: str = 'lstm'  # 'lstm', 'gru', 'rnn'
+    rnn_hidden: int = 256
+    rnn_layers: int = 2
+    rnn_dropout: float = 0.3
+    rnn_bidirectional: bool = True
     
-    fc_hidden: int = 256
-    fc_dropout: float = 0.2
+    # Head
+    head_strategy: str = 'q3discarding'
+    head_hidden: int = 256
+    head_dropout: float = 0.1
 
 
-@dataclass
-class Tier4Config(TrainingConfig):
-    """Tier 4: TransConv (Transformer + CNN) configuration."""
-    model_name: str = 'tier4_transconv'
-    
-    # PLM embeddings
-    embedding_dim: int = 1280
-    embeddings_path: str = 'data/embeddings'
-    
-    # Transformer
-    num_transformer_layers: int = 4
-    num_heads: int = 8
-    transformer_dim: int = 512
-    transformer_dropout: float = 0.1
-    
-    # Dilated CNN
-    cnn_filters: int = 256
-    dilations: List[int] = field(default_factory=lambda: [1, 2, 4, 8])
-    
-    fc_hidden: int = 256
-    fc_dropout: float = 0.2
+# =============================================================================
+# PLM Embedding Dimensions (for convenience)
+# =============================================================================
+
+PLM_EMBEDDING_DIMS = {
+    'ankh_base': 768,
+    'ankh_large': 1536,
+    'esm2_8m': 320,
+    'esm2_35m': 480,
+    'esm2_650m': 1280,
+    'protbert': 1024,
+}
 
 
-@dataclass
-class Tier5Config(TrainingConfig):
-    """Tier 5: Fine-tuned ESM-2 configuration."""
-    model_name: str = 'tier5_esm2_finetune'
-    
-    # ESM-2 model
-    esm_model: str = 'facebook/esm2_t33_650M_UR50D'  # or t12_35M for smaller
-    freeze_layers: int = 0  # Number of layers to freeze (0 = full fine-tune)
-    
-    # Task heads
-    fc_hidden: int = 512
-    fc_dropout: float = 0.1
-    
-    # Fine-tuning specific
-    learning_rate: float = 1e-5  # Lower for fine-tuning
-    gradient_checkpointing: bool = True  # Save memory
-    batch_size: int = 8  # Smaller batch for memory
+def get_embedding_dim(plm_name: str) -> int:
+    """Get embedding dimension for a PLM."""
+    if plm_name not in PLM_EMBEDDING_DIMS:
+        raise ValueError(f"Unknown PLM: {plm_name}")
+    return PLM_EMBEDDING_DIMS[plm_name]
 
 
 # =============================================================================
