@@ -286,6 +286,245 @@ class DynamicWeightMultiTaskLoss(nn.Module):
         
         return total_loss, q8_loss, q3_loss
 
+# =============================================================================
+# CRF (Conditional Random Field) Losses
+# =============================================================================
+
+class CRFLayer(nn.Module):
+    """
+    Standalone CRF layer for sequence labeling.
+    
+    Wraps the pytorch-crf library's CRF implementation.
+    Can be used as part of a model architecture or standalone.
+    
+    Args:
+        num_tags: Number of output tags/classes
+        batch_first: Whether batch dimension is first (default: True)
+    """
+    
+    def __init__(self, num_tags: int, batch_first: bool = True):
+        super().__init__()
+        from torchcrf import CRF
+        self.crf = CRF(num_tags, batch_first=batch_first)
+        self.num_tags = num_tags
+        self.batch_first = batch_first
+    
+    def forward(
+        self,
+        emissions: torch.Tensor,
+        tags: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        reduction: str = 'mean',
+    ) -> torch.Tensor:
+        """
+        Compute CRF negative log-likelihood loss.
+        
+        Args:
+            emissions: Emission scores of shape (batch, seq_len, num_tags)
+            tags: Ground truth tags of shape (batch, seq_len)
+            mask: Boolean mask of shape (batch, seq_len), True for valid positions
+            reduction: 'mean', 'sum', or 'none'
+        
+        Returns:
+            Negative log-likelihood loss
+        """
+        if mask is None:
+            mask = tags != -100
+        
+        # Replace -100 (ignore_index) with 0 for CRF computation
+        # These positions are masked anyway
+        tags_clean = tags.clone()
+        tags_clean[~mask] = 0
+        
+        # torchcrf expects mask as ByteTensor on older versions
+        # Ensure mask is boolean for newer versions
+        mask = mask.bool()
+        
+        # CRF.forward returns log-likelihood (positive)
+        # We negate it to get NLL loss for minimization
+        log_likelihood = self.crf(emissions, tags_clean, mask=mask, reduction=reduction)
+        
+        if reduction == 'none':
+            return -log_likelihood
+        return -log_likelihood
+    
+    def decode(
+        self,
+        emissions: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Viterbi decode to find the best tag sequence.
+        
+        Args:
+            emissions: Emission scores of shape (batch, seq_len, num_tags)
+            mask: Boolean mask of shape (batch, seq_len)
+        
+        Returns:
+            Best tag sequences as tensor of shape (batch, seq_len)
+        """
+        if mask is not None:
+            mask = mask.bool()
+        
+        # decode() returns list of lists
+        decoded_lists = self.crf.decode(emissions, mask=mask)
+        
+        # Convert to tensor, padding shorter sequences
+        batch_size = emissions.size(0)
+        seq_len = emissions.size(1)
+        
+        decoded_tensor = torch.full(
+            (batch_size, seq_len), 
+            fill_value=-100,  # Use -100 for padding
+            dtype=torch.long, 
+            device=emissions.device
+        )
+        
+        for i, seq in enumerate(decoded_lists):
+            decoded_tensor[i, :len(seq)] = torch.tensor(seq, device=emissions.device)
+        
+        return decoded_tensor
+
+
+class CRFLoss(nn.Module):
+    """
+    CRF Negative Log-Likelihood loss for sequence labeling.
+    
+    Uses the forward algorithm to compute the partition function
+    and returns the negative log-likelihood for training.
+    
+    This is designed to be a drop-in replacement for CrossEntropyLoss
+    in sequence labeling tasks, with added transition modeling.
+    
+    Args:
+        num_tags: Number of output tags/classes (8 for Q8, 3 for Q3)
+        batch_first: Whether batch dimension is first
+        ignore_index: Index to ignore in loss computation (default: -100)
+    """
+    
+    def __init__(
+        self,
+        num_tags: int,
+        batch_first: bool = True,
+        ignore_index: int = -100,
+    ):
+        super().__init__()
+        self.crf_layer = CRFLayer(num_tags, batch_first)
+        self.num_tags = num_tags
+        self.ignore_index = ignore_index
+    
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute CRF negative log-likelihood loss.
+        
+        Args:
+            inputs: Emission logits of shape (batch, seq_len, num_tags)
+            targets: Ground truth tags of shape (batch, seq_len)
+        
+        Returns:
+            Scalar loss value
+        """
+        # Create mask from targets
+        mask = targets != self.ignore_index
+        
+        return self.crf_layer(inputs, targets, mask=mask, reduction='mean')
+    
+    def decode(
+        self,
+        inputs: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Viterbi decode to get best tag sequence.
+        
+        Args:
+            inputs: Emission logits of shape (batch, seq_len, num_tags)
+            mask: Optional boolean mask
+        
+        Returns:
+            Decoded tags of shape (batch, seq_len)
+        """
+        return self.crf_layer.decode(inputs, mask=mask)
+
+
+class MultiTaskCRFLoss(nn.Module):
+    """
+    Multi-task CRF loss for joint Q8 and Q3 prediction.
+    
+    Uses independent CRF layers for Q8 (8 tags) and Q3 (3 tags),
+    combined with configurable task weights.
+    
+    Total Loss = λ_q8 * CRF_NLL_q8 + λ_q3 * CRF_NLL_q3
+    
+    Args:
+        q8_weight: Weight for Q8 CRF loss (λ_q8)
+        q3_weight: Weight for Q3 CRF loss (λ_q3)
+    """
+    
+    def __init__(
+        self,
+        q8_weight: float = 1.0,
+        q3_weight: float = 0.5,
+    ):
+        super().__init__()
+        self.q8_crf = CRFLoss(num_tags=8)
+        self.q3_crf = CRFLoss(num_tags=3)
+        self.q8_weight = q8_weight
+        self.q3_weight = q3_weight
+    
+    def forward(
+        self,
+        q8_logits: torch.Tensor,
+        q8_targets: torch.Tensor,
+        q3_logits: torch.Tensor,
+        q3_targets: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Compute combined CRF loss for both tasks.
+        
+        Args:
+            q8_logits: Q8 emission logits (batch, seq_len, 8)
+            q8_targets: Q8 ground truth tags (batch, seq_len)
+            q3_logits: Q3 emission logits (batch, seq_len, 3)
+            q3_targets: Q3 ground truth tags (batch, seq_len)
+        
+        Returns:
+            Tuple of (total_loss, q8_loss, q3_loss)
+        """
+        q8_loss = self.q8_crf(q8_logits, q8_targets)
+        q3_loss = self.q3_crf(q3_logits, q3_targets)
+        
+        total_loss = self.q8_weight * q8_loss + self.q3_weight * q3_loss
+        
+        return total_loss, q8_loss, q3_loss
+    
+    def decode(
+        self,
+        q8_logits: torch.Tensor,
+        q3_logits: torch.Tensor,
+        q8_mask: Optional[torch.Tensor] = None,
+        q3_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Viterbi decode both Q8 and Q3 sequences.
+        
+        Args:
+            q8_logits: Q8 emission logits (batch, seq_len, 8)
+            q3_logits: Q3 emission logits (batch, seq_len, 3)
+            q8_mask: Optional mask for Q8
+            q3_mask: Optional mask for Q3
+        
+        Returns:
+            Tuple of (q8_decoded, q3_decoded) tensors
+        """
+        q8_decoded = self.q8_crf.decode(q8_logits, q8_mask)
+        q3_decoded = self.q3_crf.decode(q3_logits, q3_mask)
+        return q8_decoded, q3_decoded
+
 
 # =============================================================================
 # Factory Functions
@@ -301,8 +540,8 @@ def get_loss_function(
     Factory function to create loss functions.
     
     Args:
-        loss_type: 'focal', 'weighted_ce', 'label_smoothing', or 'ce'
-        task: 'q8' or 'q3' (determines class weights)
+        loss_type: 'focal', 'weighted_ce', 'label_smoothing', 'ce', or 'crf'
+        task: 'q8' or 'q3' (determines class weights and num_tags for CRF)
         gamma: Focal loss gamma parameter
         label_smoothing: Label smoothing factor
     
@@ -310,6 +549,7 @@ def get_loss_function(
         Loss function module
     """
     weights = SST8_WEIGHTS if task == 'q8' else SST3_WEIGHTS
+    num_tags = 8 if task == 'q8' else 3
     
     if loss_type == 'focal':
         return FocalLoss(alpha=weights, gamma=gamma)
@@ -319,6 +559,8 @@ def get_loss_function(
         return LabelSmoothingCrossEntropy(smoothing=label_smoothing)
     elif loss_type == 'ce':
         return nn.CrossEntropyLoss(ignore_index=-100)
+    elif loss_type == 'crf':
+        return CRFLoss(num_tags=num_tags)
     else:
         raise ValueError(f"Unknown loss type: {loss_type}")
 
@@ -334,15 +576,19 @@ def get_multitask_loss(
     Factory function for multi-task loss.
     
     Args:
-        loss_type: Base loss type ('focal', 'weighted_ce', etc.)
+        loss_type: Base loss type ('focal', 'weighted_ce', 'crf', etc.)
         q8_weight: Weight for Q8 loss
         q3_weight: Weight for Q3 loss
-        dynamic_weights: Use dynamic weight averaging
+        dynamic_weights: Use dynamic weight averaging (not applicable for CRF)
         gamma: Focal loss gamma
     
     Returns:
         Multi-task loss module
     """
+    # CRF loss has its own multi-task implementation
+    if loss_type == 'crf':
+        return MultiTaskCRFLoss(q8_weight=q8_weight, q3_weight=q3_weight)
+    
     q8_loss = get_loss_function(loss_type, 'q8', gamma)
     q3_loss = get_loss_function(loss_type, 'q3', gamma)
     

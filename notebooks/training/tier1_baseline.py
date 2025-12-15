@@ -126,7 +126,8 @@ config = Tier1Config(
     patience=10,
     gradient_clip=1.0,
     
-    # Loss
+    # Loss - Options: 'focal', 'weighted_ce', 'label_smoothing', 'ce', 'crf'
+    loss_type='focal',  # Use 'crf' for CRF Negative Log-Likelihood
     focal_gamma=2.0,
     q8_loss_weight=1.0,
     q3_loss_weight=0.5,
@@ -287,18 +288,26 @@ print(f"   Q3 Out: {q3_out.shape}")
 # ## 5. Loss Function & Optimizer
 
 # %%
-# Multi-task loss with focal loss
+# Multi-task loss
+# Options: 'focal' (default), 'weighted_ce', 'label_smoothing', 'ce', 'crf'
+# Use 'crf' for CRF Negative Log-Likelihood loss which models label transitions
 loss_fn = get_multitask_loss(
-    loss_type='focal',
+    loss_type=config.loss_type,
     q8_weight=config.q8_loss_weight,
     q3_weight=config.q3_loss_weight,
-    gamma=config.focal_gamma,
+    gamma=config.focal_gamma,  # Only used for 'focal' loss type
 )
 
-print("📉 Loss Function: MultiTaskLoss (Focal)")
+loss_type_display = config.loss_type.upper()
+if config.loss_type == 'crf':
+    print("📉 Loss Function: MultiTaskCRFLoss (CRF NLL)")
+    print("   Uses Viterbi decoding for optimal sequence prediction")
+else:
+    print(f"📉 Loss Function: MultiTaskLoss ({loss_type_display})")
 print(f"   Q8 Weight: {config.q8_loss_weight}")
 print(f"   Q3 Weight: {config.q3_loss_weight}")
-print(f"   Focal Gamma: {config.focal_gamma}")
+if config.loss_type == 'focal':
+    print(f"   Focal Gamma: {config.focal_gamma}")
 
 # %%
 # Optimizer

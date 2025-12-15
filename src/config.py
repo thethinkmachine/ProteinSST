@@ -155,6 +155,7 @@ class TrainingConfig:
     
     # Loss
     focal_gamma: float = 2.0
+    loss_type: str = 'focal'  # 'focal', 'weighted_ce', 'label_smoothing', 'ce', 'crf'
     label_smoothing: float = 0.0
     q8_loss_weight: float = 1.0
     q3_loss_weight: float = 0.5

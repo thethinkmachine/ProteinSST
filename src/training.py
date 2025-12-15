@@ -21,7 +21,7 @@ from .metrics import (
     compute_sst8_per_class_metrics, compute_sst3_per_class_metrics,
     EvaluationReport, evaluate_model,
 )
-from .losses import MultiTaskLoss
+from .losses import MultiTaskLoss, MultiTaskCRFLoss
 
 
 # =============================================================================
@@ -259,6 +259,9 @@ class Trainer:
 
         total_samples = 0
         
+        # Check if using CRF loss (has decode method)
+        use_crf = isinstance(self.loss_fn, MultiTaskCRFLoss)
+        
         for batch in self.val_loader:
             features = batch['features'].to(self.device)
             q8_targets = batch['sst8'].to(self.device)   # (B, L)
@@ -281,13 +284,19 @@ class Trainer:
             # --------------------------------------------------
             mask = q8_targets != -100  # (B, L)
 
-            # Q8
-            q8_preds = q8_logits.argmax(dim=-1)  # (B, L)
-            all_q8_preds.append(q8_preds[mask]) # (N,)
+            # Get predictions: use Viterbi decoding for CRF, argmax otherwise
+            if use_crf:
+                # Viterbi decode for CRF - returns optimal sequence
+                q8_preds, q3_preds = self.loss_fn.decode(
+                    q8_logits, q3_logits, q8_mask=mask, q3_mask=mask
+                )
+            else:
+                # Standard argmax for non-CRF losses
+                q8_preds = q8_logits.argmax(dim=-1)  # (B, L)
+                q3_preds = q3_logits.argmax(dim=-1)
+            
+            all_q8_preds.append(q8_preds[mask])  # (N,)
             all_q8_targets.append(q8_targets[mask])
-
-            # Q3
-            q3_preds = q3_logits.argmax(dim=-1)
             all_q3_preds.append(q3_preds[mask])
             all_q3_targets.append(q3_targets[mask])
         

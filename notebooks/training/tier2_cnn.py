@@ -128,7 +128,8 @@ config = Tier2Config(
     patience=10,
     gradient_clip=1.0,
     
-    # Loss
+    # Loss - Options: 'focal', 'weighted_ce', 'label_smoothing', 'ce', 'crf'
+    loss_type='focal',  # Use 'crf' for CRF Negative Log-Likelihood
     focal_gamma=2.0,
     q8_loss_weight=1.0,
     q3_loss_weight=0.5,
@@ -260,8 +261,10 @@ print(f"\n✓ Forward Pass: Input {test_input.shape} → Q8 {q8_out.shape}, Q3 {
 # ## 5. Loss & Optimizer
 
 # %%
+# Multi-task loss
+# Options: 'focal' (default), 'weighted_ce', 'label_smoothing', 'ce', 'crf'
 loss_fn = get_multitask_loss(
-    loss_type='focal',
+    loss_type=config.loss_type,
     q8_weight=config.q8_loss_weight,
     q3_weight=config.q3_loss_weight,
     gamma=config.focal_gamma,
@@ -270,7 +273,7 @@ loss_fn = get_multitask_loss(
 optimizer = create_optimizer(model, lr=config.learning_rate, weight_decay=config.weight_decay)
 scheduler = create_scheduler(optimizer, scheduler_type='cosine', num_epochs=config.max_epochs)
 
-print("✓ Loss, optimizer, scheduler configured")
+print(f"✓ Loss ({config.loss_type}), optimizer, scheduler configured")
 
 # %% [markdown]
 # ## 6. Training
