@@ -182,7 +182,8 @@ def main():
     if args.output:
         output_path = Path(args.output)
     else:
-        output_path = Path(f'data/embeddings/{args.plm}.h5')
+        # Default relative to project root
+        output_path = Path(__file__).parent.parent / f'data/embeddings/{args.plm}.h5'
     
     output_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Output: {output_path}")
@@ -194,8 +195,13 @@ def main():
     print(f"Model loaded successfully!")
     print()
     
-    # Process train data
+    # Resolve paths relative to project root if they don't exist in CWD
+    project_root = Path(__file__).parent.parent
+    
     train_path = Path(args.train_csv)
+    if not train_path.exists() and (project_root / args.train_csv).exists():
+        train_path = project_root / args.train_csv
+
     if train_path.exists():
         print(f"Processing training data from {train_path}")
         train_df = pd.read_csv(train_path)
@@ -211,9 +217,14 @@ def main():
             device=device,
             dataset_name='train',
         )
+    else:
+        print(f"Warning: Training data not found at {args.train_csv}")
     
     # Process CB513 test data
     cb513_path = Path(args.cb513_csv)
+    if not cb513_path.exists() and (project_root / args.cb513_csv).exists():
+        cb513_path = project_root / args.cb513_csv
+
     if cb513_path.exists():
         print(f"\nProcessing CB513 test data from {cb513_path}")
         cb513_df = pd.read_csv(cb513_path)
@@ -229,22 +240,27 @@ def main():
             device=device,
             dataset_name='cb513',
         )
+    else:
+        print(f"Warning: CB513 data not found at {args.cb513_csv}")
     
     # Summary
-    with h5py.File(output_path, 'r') as f:
-        train_count = len(f['train']) if 'train' in f else 0
-        cb513_count = len(f['cb513']) if 'cb513' in f else 0
-    
-    file_size = output_path.stat().st_size / 1e9
-    
-    print()
-    print("=" * 60)
-    print(f"✅ Extraction complete!")
-    print(f"   Train embeddings: {train_count}")
-    print(f"   CB513 embeddings: {cb513_count}")
-    print(f"   File size: {file_size:.2f} GB")
-    print(f"   Location: {output_path.absolute()}")
-    print("=" * 60)
+    if output_path.exists():
+        with h5py.File(output_path, 'r') as f:
+            train_count = len(f['train']) if 'train' in f else 0
+            cb513_count = len(f['cb513']) if 'cb513' in f else 0
+        
+        file_size = output_path.stat().st_size / 1e9
+        
+        print()
+        print("=" * 60)
+        print(f"✅ Extraction complete!")
+        print(f"   Train embeddings: {train_count}")
+        print(f"   CB513 embeddings: {cb513_count}")
+        print(f"   File size: {file_size:.2f} GB")
+        print(f"   Location: {output_path.absolute()}")
+        print("=" * 60)
+    else:
+        print("\nNo output file was created (no input data found or processed).")
 
 
 if __name__ == '__main__':
