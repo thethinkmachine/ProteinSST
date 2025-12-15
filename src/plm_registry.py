@@ -113,16 +113,19 @@ def load_plm(plm_name: str, device: str = 'cuda') -> Tuple[nn.Module, Any]:
 
 
 def _load_ankh(model_id: str, device: str) -> Tuple[nn.Module, Any]:
-    """Load Ankh model using the ankh library."""
-    try:
-        import ankh
-    except ImportError:
-        raise ImportError("Install ankh: pip install ankh")
+    """Load Ankh model using transformers directly.
     
-    if 'large' in model_id:
-        model, tokenizer = ankh.load_large_model()
-    else:
-        model, tokenizer = ankh.load_base_model()
+    Ankh is based on a T5 encoder architecture. We use T5EncoderModel
+    from transformers instead of the ankh package to avoid sentencepiece
+    compatibility issues with Python 3.13+.
+    """
+    try:
+        from transformers import T5EncoderModel, AutoTokenizer
+    except ImportError:
+        raise ImportError("Install transformers: pip install transformers")
+    
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model = T5EncoderModel.from_pretrained(model_id)
     
     model = model.to(device)
     model.eval()
