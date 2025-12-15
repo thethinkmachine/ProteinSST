@@ -11,9 +11,11 @@ __pycache__/
 
 # Training checkpoints & history logs
 *_history.json
-*_history.png
 *.ckpt
-*_matrix.png
+*.h5
+*.png
+*.jpg
+*.jpeg
 
 # Distribution / packaging
 .Python

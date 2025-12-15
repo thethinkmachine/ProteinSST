@@ -188,7 +188,7 @@ class TrainingConfig:
 @dataclass
 class PLMConfig:
     """PLM embedding configuration."""
-    plm_name: str = 'ankh_base'  # 'ankh_base', 'ankh_large', 'esm2_35m', 'esm2_650m', 'protbert'
+    plm_name: str = 'esm2_35m'  # 'esm2_8m', 'esm2_35m', 'esm2_650m', 'protbert'
     embeddings_path: str = 'data/embeddings'  # Path to HDF5 file or directory
 
 
@@ -244,8 +244,8 @@ class Tier1Config(TrainingConfig):
     model_name: str = 'tier1_baseline'
     
     # PLM
-    plm_name: str = 'ankh_base'
-    embeddings_path: str = 'data/embeddings/ankh_base.h5'
+    plm_name: str = 'esm2_35m'
+    embeddings_path: str = 'data/embeddings/esm2_35m.h5'
     
     # FC layer
     fc_hidden: int = 512
@@ -266,8 +266,8 @@ class Tier2Config(TrainingConfig):
     model_name: str = 'tier2_cnn'
     
     # PLM
-    plm_name: str = 'ankh_base'
-    embeddings_path: str = 'data/embeddings/ankh_base.h5'
+    plm_name: str = 'esm2_35m'
+    embeddings_path: str = 'data/embeddings/esm2_35m.h5'
     
     # CNN
     cnn_type: str = 'multiscale'  # 'multiscale' or 'deep'
@@ -294,8 +294,8 @@ class Tier3Config(TrainingConfig):
     model_name: str = 'tier3_cnn_rnn'
     
     # PLM
-    plm_name: str = 'ankh_base'
-    embeddings_path: str = 'data/embeddings/ankh_base.h5'
+    plm_name: str = 'esm2_35m'
+    embeddings_path: str = 'data/embeddings/esm2_35m.h5'
     
     # CNN
     cnn_type: str = 'multiscale'  # 'multiscale' or 'deep'
@@ -325,8 +325,6 @@ class Tier3Config(TrainingConfig):
 # =============================================================================
 
 PLM_EMBEDDING_DIMS = {
-    'ankh_base': 768,
-    'ankh_large': 1536,
     'esm2_8m': 320,
     'esm2_35m': 480,
     'esm2_650m': 1280,

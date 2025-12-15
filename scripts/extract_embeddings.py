@@ -2,11 +2,10 @@
 """
 Extract PLM embeddings for all protein sequences.
 
-Supports multiple PLMs: Ankh, ESM-2, ProtBert
+Supports ESM-2 and ProtBert models.
 Outputs embeddings to a single HDF5 file for efficient storage.
 
 Usage:
-    python scripts/extract_embeddings.py --plm ankh_base --output data/embeddings/ankh_base.h5
     python scripts/extract_embeddings.py --plm esm2_650m --output data/embeddings/esm2_650m.h5
     python scripts/extract_embeddings.py --plm protbert --output data/embeddings/protbert.h5
 """
@@ -38,7 +37,7 @@ def parse_args():
     parser.add_argument(
         '--plm',
         type=str,
-        default='ankh_base',
+        default='esm2_35m',
         choices=list(PLM_REGISTRY.keys()),
         help='PLM to use for embedding extraction'
     )

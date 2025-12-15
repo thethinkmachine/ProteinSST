@@ -74,7 +74,6 @@ if DEVICE == 'cuda':
 # %%
 from src.config import (
     Tier3Config, LEAKAGE_TRAIN_IDS,
-    SST8_WEIGHTS, SST3_WEIGHTS,
     get_embedding_dim, PLM_EMBEDDING_DIMS,
 )
 from src.data import HDF5EmbeddingDataset, collate_fn
@@ -92,14 +91,14 @@ print("✓ Library modules imported")
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════
 
-# Choose components
-CNN_TYPE = 'multiscale'  # 'multiscale' or 'deep'
-RNN_TYPE = 'lstm'        # 'lstm', 'gru', or 'rnn'
+PLM_NAME = 'esm2_35m'  # Options: 'esm2_8m', 'esm2_35m', 'esm2_650m', 'protbert'
+CNN_TYPE = 'multiscale'  # Options: 'multiscale' or 'deep'
+RNN_TYPE = 'lstm'  # Options: 'lstm', 'gru', or 'rnn'
 
 config = Tier3Config(
     # PLM
-    plm_name='ankh_base',
-    embeddings_path='../../data/embeddings/ankh_base.h5',
+    plm_name=PLM_NAME,
+    embeddings_path=f'../../data/embeddings/{PLM_NAME}.h5',
     
     # CNN
     cnn_type=CNN_TYPE,
@@ -137,11 +136,11 @@ config = Tier3Config(
     q3_loss_weight=0.5,
     
     # Checkpointing
-    checkpoint_dir=f'../../checkpoints/tier3_{CNN_TYPE}_{RNN_TYPE}',
+    checkpoint_dir=f'../../checkpoints/tier3_{PLM_NAME}_{CNN_TYPE}_{RNN_TYPE}',
     
-    # Tracking
-    use_tracking=False,
-    experiment_name=f'tier3_{CNN_TYPE}_{RNN_TYPE}',
+    # Tracking (enabled by default)
+    use_tracking=True,
+    experiment_name=f'tier3_{PLM_NAME}_{CNN_TYPE}_{RNN_TYPE}',
 )
 
 # %%
@@ -160,6 +159,7 @@ print(f"   Layers: {config.rnn_layers}")
 print(f"   Bidirectional: {config.rnn_bidirectional}")
 print(f"   Output dim: {config.rnn_hidden * (2 if config.rnn_bidirectional else 1)}")
 print(f"\n🎯 Head: {config.head_strategy}")
+print(f"\n📊 Tracking: {'Enabled' if config.use_tracking else 'Disabled'}")
 print("═" * 60)
 
 # %% [markdown]
@@ -274,8 +274,6 @@ loss_fn = get_multitask_loss(
     loss_type='focal',
     q8_weight=config.q8_loss_weight,
     q3_weight=config.q3_loss_weight,
-    q8_class_weights=SST8_WEIGHTS.to(DEVICE),
-    q3_class_weights=SST3_WEIGHTS.to(DEVICE),
     gamma=config.focal_gamma,
 )
 
@@ -305,6 +303,9 @@ trainer = Trainer(
 )
 
 print("✓ Trainer initialized")
+print(f"   Checkpoint dir: {config.checkpoint_dir}")
+print(f"   Mixed Precision: {trainer.use_amp}")
+print(f"   Tracking: {trainer.use_tracking}")
 
 # %%
 history = trainer.train(
@@ -323,7 +324,60 @@ fig = plot_training_history(
 )
 
 # %% [markdown]
-# ## 8. Q3-Guided Analysis
+# ## 8. Evaluation on CB513 Test Set
+
+# %%
+cb513_path = Path(config.embeddings_path)
+
+if cb513_path.exists():
+    try:
+        cb513_dataset = HDF5EmbeddingDataset(
+            csv_path='../../data/cb513.csv',
+            h5_path=config.embeddings_path,
+            dataset_name='cb513',
+            max_length=config.max_seq_length,
+        )
+        
+        cb513_loader = DataLoader(
+            cb513_dataset,
+            batch_size=config.batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+            num_workers=4,
+        )
+        
+        print(f"✓ CB513 test set loaded: {len(cb513_dataset)} samples")
+        
+        # Load best model
+        best_checkpoint = torch.load(
+            Path(config.checkpoint_dir) / 'best_model.pt',
+            map_location=DEVICE
+        )
+        model.load_state_dict(best_checkpoint['model_state_dict'])
+        print(f"✓ Best model loaded (epoch {best_checkpoint.get('epoch', 'unknown')})")
+        
+        # Evaluate on CB513
+        original_val_loader = trainer.val_loader
+        trainer.val_loader = cb513_loader
+        test_metrics = trainer.validate()
+        trainer.val_loader = original_val_loader
+        
+        print("\n" + "═" * 60)
+        print("📊 CB513 TEST SET RESULTS")
+        print("═" * 60)
+        print(f"   Q8 Accuracy: {test_metrics['q8_accuracy']:.4f}")
+        print(f"   Q3 Accuracy: {test_metrics['q3_accuracy']:.4f}")
+        print(f"   Q8 F1:       {test_metrics['q8_f1']:.4f}")
+        print(f"   Q3 F1:       {test_metrics['q3_f1']:.4f}")
+        print("═" * 60)
+        
+    except Exception as e:
+        print(f"⚠️ Could not evaluate on CB513: {e}")
+else:
+    print("⚠️ CB513 embeddings not found. Run extraction first.")
+
+# %% [markdown]
+# ## 9. Q3-Guided Analysis
 #
 # If using `q3guided` strategy, analyze how well Q3 guides Q8.
 
@@ -350,13 +404,13 @@ else:
     print("ℹ️  Using q3discarding strategy - Q3 is trained but discarded at inference")
 
 # %% [markdown]
-# ## 9. Summary
+# ## 10. Summary
 
 # %%
 print("\n" + "═" * 60)
 print(f"🎉 TIER 3 {config.cnn_type.upper()} + {config.rnn_type.upper()} TRAINING COMPLETE")
 print("═" * 60)
-print(f"\n📈 Best Results:")
+print(f"\n📈 Best Validation Results:")
 print(f"   Harmonic F1: {trainer.best_harmonic_f1:.4f}")
 print(f"   Q8 F1:       {trainer.best_q8_f1:.4f}")
 print(f"   Q8 Accuracy: {trainer.best_q8_accuracy:.4f}")

@@ -2,7 +2,6 @@
 PLM Registry - Unified interface for loading protein language models.
 
 Supported PLMs:
-- Ankh (T5-based): ankh_base, ankh_large
 - ESM-2 (BERT-based): esm2_8m, esm2_35m, esm2_650m
 - ProtBert (BERT-based): protbert
 """
@@ -24,20 +23,6 @@ class PLMInfo:
 
 # Registry of supported PLMs
 PLM_REGISTRY = {
-    # Ankh models (T5 architecture)
-    'ankh_base': PLMInfo(
-        model_id='ElnaggarLab/ankh-base',
-        embedding_dim=768,
-        model_type='t5',
-        description='Ankh Base - T5 encoder-decoder, 450M params'
-    ),
-    'ankh_large': PLMInfo(
-        model_id='ElnaggarLab/ankh-large',
-        embedding_dim=1536,
-        model_type='t5',
-        description='Ankh Large - T5 encoder-decoder, 1.15B params'
-    ),
-    
     # ESM-2 models (BERT architecture)
     'esm2_8m': PLMInfo(
         model_id='facebook/esm2_t6_8M_UR50D',
@@ -94,7 +79,7 @@ def load_plm(plm_name: str, device: str = 'cuda') -> Tuple[nn.Module, Any]:
     Load a protein language model and its tokenizer.
     
     Args:
-        plm_name: Name of the PLM (e.g., 'ankh_base', 'esm2_650m', 'protbert')
+        plm_name: Name of the PLM (e.g., 'esm2_650m', 'protbert')
         device: Device to load model to
         
     Returns:
@@ -102,9 +87,7 @@ def load_plm(plm_name: str, device: str = 'cuda') -> Tuple[nn.Module, Any]:
     """
     info = get_plm_info(plm_name)
     
-    if info.model_type == 't5':
-        return _load_ankh(info.model_id, device)
-    elif info.model_type == 'esm':
+    if info.model_type == 'esm':
         return _load_esm(info.model_id, device)
     elif info.model_type == 'bert':
         return _load_protbert(info.model_id, device)
@@ -112,24 +95,6 @@ def load_plm(plm_name: str, device: str = 'cuda') -> Tuple[nn.Module, Any]:
         raise ValueError(f"Unknown model type: {info.model_type}")
 
 
-def _load_ankh(model_id: str, device: str) -> Tuple[nn.Module, Any]:
-    """Load Ankh model using transformers directly.
-    
-    Ankh is based on a T5 encoder architecture. We use T5EncoderModel
-    from transformers instead of the ankh package to avoid sentencepiece
-    compatibility issues with Python 3.13+.
-    """
-    try:
-        from transformers import T5EncoderModel, AutoTokenizer
-    except ImportError:
-        raise ImportError("Install transformers: pip install transformers")
-    
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    model = T5EncoderModel.from_pretrained(model_id)
-    
-    model = model.to(device)
-    model.eval()
-    return model, tokenizer
 
 
 def _load_esm(model_id: str, device: str) -> Tuple[nn.Module, Any]:
@@ -176,7 +141,7 @@ def extract_embeddings(
         model: Loaded PLM model
         tokenizer: PLM tokenizer
         sequences: List of protein sequences (strings)
-        plm_type: Type of PLM ('t5', 'esm', 'bert')
+        plm_type: Type of PLM ('esm', 'bert')
         device: Device to run on
         max_length: Maximum sequence length
         
@@ -190,25 +155,7 @@ def extract_embeddings(
         if len(seq) > max_length:
             seq = seq[:max_length]
         
-        if plm_type == 't5':
-            # Ankh: tokenize as list of characters
-            tokens = tokenizer(
-                [list(seq)],
-                add_special_tokens=True,
-                padding=True,
-                is_split_into_words=True,
-                return_tensors="pt",
-            )
-            input_ids = tokens['input_ids'].to(device)
-            attention_mask = tokens['attention_mask'].to(device)
-            
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            # Get encoder last hidden state
-            hidden = outputs.last_hidden_state[0]  # (seq_len+2, dim)
-            # Remove special tokens (BOS and EOS)
-            emb = hidden[1:-1].cpu()
-            
-        elif plm_type == 'esm':
+        if plm_type == 'esm':
             # ESM-2: standard tokenization
             tokens = tokenizer(
                 seq,

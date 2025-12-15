@@ -39,8 +39,8 @@
 #
 # | Feature | Description |
 # |---------|-------------|
-# | **PLM Support** | Ankh, ESM-2, ProtBert |
-# | **Parameters** | ~660K (lightweight) |
+# | **PLM Support** | ESM-2 (8M, 35M, 650M), ProtBert |
+# | **Parameters** | ~500-660K (lightweight) |
 # | **Training Time** | ~5min/epoch on GPU |
 # | **Use Case** | Baseline establishment, fast experimentation |
 
@@ -74,7 +74,6 @@ if DEVICE == 'cuda':
 # Import library modules
 from src.config import (
     Tier1Config, LEAKAGE_TRAIN_IDS,
-    SST8_WEIGHTS, SST3_WEIGHTS,
     get_embedding_dim, PLM_EMBEDDING_DIMS,
 )
 from src.data import HDF5EmbeddingDataset, collate_fn
@@ -102,10 +101,12 @@ print("─" * 50)
 # CONFIGURATION - Modify these values
 # ═══════════════════════════════════════════════════════════════════
 
+PLM_NAME = 'esm2_35m'  # Options: 'esm2_8m', 'esm2_35m', 'esm2_650m', 'protbert'
+
 config = Tier1Config(
     # PLM Selection
-    plm_name='ankh_base',
-    embeddings_path='../../data/embeddings/ankh_base.h5',
+    plm_name=PLM_NAME,
+    embeddings_path=f'../../data/embeddings/{PLM_NAME}.h5',
     
     # Model Architecture
     fc_hidden=512,
@@ -131,12 +132,11 @@ config = Tier1Config(
     q3_loss_weight=0.5,
     
     # Checkpointing
-    checkpoint_dir='../../checkpoints/tier1_baseline',
+    checkpoint_dir=f'../../checkpoints/tier1_{PLM_NAME}',
     
-    # Optional: Experiment Tracking & Hub
-    use_tracking=False,  # Set True to enable Trackio
-    experiment_name='tier1_baseline',
-    # hub_model_id='your-username/ProteinSST-Tier1',  # Uncomment to push to Hub
+    # Experiment Tracking (enabled by default)
+    use_tracking=True,
+    experiment_name=f'tier1_{PLM_NAME}',
 )
 
 # %%
@@ -155,6 +155,7 @@ print(f"   Batch Size: {config.batch_size}")
 print(f"   Learning Rate: {config.learning_rate}")
 print(f"   Max Epochs: {config.max_epochs}")
 print(f"   Early Stopping Patience: {config.patience}")
+print(f"\n📊 Tracking: {'Enabled' if config.use_tracking else 'Disabled'}")
 print("═" * 60)
 
 # %% [markdown]
@@ -286,13 +287,11 @@ print(f"   Q3 Out: {q3_out.shape}")
 # ## 5. Loss Function & Optimizer
 
 # %%
-# Multi-task loss with focal loss and class weights
+# Multi-task loss with focal loss
 loss_fn = get_multitask_loss(
     loss_type='focal',
     q8_weight=config.q8_loss_weight,
     q3_weight=config.q3_loss_weight,
-    q8_class_weights=SST8_WEIGHTS.to(DEVICE),
-    q3_class_weights=SST3_WEIGHTS.to(DEVICE),
     gamma=config.focal_gamma,
 )
 
@@ -328,8 +327,7 @@ print("\n📅 Scheduler: CosineAnnealingWarmRestarts")
 # Using the `Trainer` class from `src/training.py` which includes:
 # - Early stopping based on harmonic mean of Q8 and Q3 F1 scores
 # - Automatic checkpointing
-# - Optional Trackio experiment tracking
-# - Optional HuggingFace Hub push
+# - Experiment tracking (Trackio/W&B)
 
 # %%
 # Create trainer using library
@@ -344,10 +342,9 @@ trainer = Trainer(
     checkpoint_dir=config.checkpoint_dir,
     gradient_clip=config.gradient_clip,
     log_every=100,
-    use_amp=torch.cuda.is_available(),  # Use FP16 on GPU
+    use_amp=torch.cuda.is_available(),
     use_tracking=config.use_tracking,
     experiment_name=config.experiment_name,
-    hub_model_id=config.hub_model_id if hasattr(config, 'hub_model_id') else None,
     training_config=config.__dict__,
 )
 
@@ -378,10 +375,10 @@ fig = plot_training_history(
 # ## 8. Evaluation on CB513 Test Set
 
 # %%
-# Load CB513 test set if available
-cb513_h5_path = Path(config.embeddings_path)
+# Load CB513 test set
+cb513_path = Path(config.embeddings_path)
 
-if cb513_h5_path.exists():
+if cb513_path.exists():
     try:
         cb513_dataset = HDF5EmbeddingDataset(
             csv_path='../../data/cb513.csv',
@@ -400,20 +397,19 @@ if cb513_h5_path.exists():
         
         print(f"✓ CB513 test set loaded: {len(cb513_dataset)} samples")
         
-        # Load best model and evaluate
+        # Load best model
         best_checkpoint = torch.load(
             Path(config.checkpoint_dir) / 'best_model.pt',
             map_location=DEVICE
         )
         model.load_state_dict(best_checkpoint['model_state_dict'])
+        print(f"✓ Best model loaded (epoch {best_checkpoint.get('epoch', 'unknown')})")
         
-        # Temporarily swap val_loader to evaluate on CB513
+        # Evaluate on CB513
         original_val_loader = trainer.val_loader
         trainer.val_loader = cb513_loader
-        
         test_metrics = trainer.validate()
-        
-        trainer.val_loader = original_val_loader  # Restore
+        trainer.val_loader = original_val_loader
         
         print("\n" + "═" * 60)
         print("📊 CB513 TEST SET RESULTS")
@@ -436,7 +432,7 @@ else:
 print("\n" + "═" * 60)
 print("🎉 TRAINING COMPLETE")
 print("═" * 60)
-print(f"\n📈 Best Results:")
+print(f"\n📈 Best Validation Results:")
 print(f"   Harmonic F1: {trainer.best_harmonic_f1:.4f}")
 print(f"   Q8 F1:       {trainer.best_q8_f1:.4f}")
 print(f"   Q8 Accuracy: {trainer.best_q8_accuracy:.4f}")

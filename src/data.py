@@ -387,7 +387,7 @@ class HDF5EmbeddingDataset(Dataset):
     
     def __del__(self):
         """Close HDF5 file handle on cleanup."""
-        if self._h5_file is not None:
+        if hasattr(self, '_h5_file') and self._h5_file is not None:
             self._h5_file.close()
 
 
