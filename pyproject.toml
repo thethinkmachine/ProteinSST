@@ -22,4 +22,5 @@ dependencies = [
     "seaborn>=0.13.2",
     "scikit-learn>=1.8.0",
     "pytorch-crf>=0.7.2",
+    "jupytext>=1.18.1",
 ]
