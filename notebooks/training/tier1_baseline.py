@@ -127,8 +127,8 @@ config = Tier1Config(
     gradient_clip=1.0,
     
     # Loss - Options: 'focal', 'weighted_ce', 'label_smoothing', 'ce', 'crf'
-    loss_type='focal',  # Use 'crf' for CRF Negative Log-Likelihood
-    focal_gamma=2.0,
+    loss_type='crf',  # Use 'crf' for CRF Negative Log-Likelihood
+    focal_gamma=1.0,
     q8_loss_weight=1.0,
     q3_loss_weight=0.5,
     
@@ -137,6 +137,8 @@ config = Tier1Config(
     
     # Experiment Tracking (enabled by default)
     use_tracking=True,
+    trackio_space_id='thethinkmachine/trackio',
+    hub_model_id=f'thethinkmachine/ProteinSST-{PLM_NAME}',
     experiment_name=f'tier1_{PLM_NAME}',
 )
 
@@ -353,6 +355,8 @@ trainer = Trainer(
     log_every=100,
     use_amp=torch.cuda.is_available(),
     use_tracking=config.use_tracking,
+    trackio_space_id=config.trackio_space_id,
+    hub_model_id=config.hub_model_id,
     experiment_name=config.experiment_name,
     training_config=config.__dict__,
 )

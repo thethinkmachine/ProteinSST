@@ -316,7 +316,7 @@ Based on architecture tier:
 |-----------|-------|
 """
         key_params = ['learning_rate', 'batch_size', 'max_epochs', 'max_seq_length', 
-                      'focal_gamma', 'q8_loss_weight', 'q3_loss_weight', 'augmentation_level']
+                      'loss_type', 'focal_gamma', 'q8_loss_weight', 'q3_loss_weight', 'augmentation_level']
         for param in key_params:
             if config and param in config:
                 card += f"| {param.replace('_', ' ').title()} | {config[param]} |\n"
@@ -377,6 +377,11 @@ with torch.no_grad():
 q8_pred = q8_logits.argmax(dim=-1).squeeze()
 q3_pred = q3_logits.argmax(dim=-1).squeeze()
 
+# For CRF models, use Viterbi decoding instead:
+# from src.losses import MultiTaskCRFLoss
+# loss_fn = MultiTaskCRFLoss()
+# q8_pred, q3_pred = loss_fn.decode(q8_logits, q3_logits)
+
 # Convert to structure labels
 q8_labels = ''.join([SST8_CLASSES[i] for i in q8_pred.tolist()])
 q3_labels = ''.join([SST3_CLASSES[i] for i in q3_pred.tolist()])
@@ -388,13 +393,33 @@ print(f"Q3:       {{q3_labels}}")
 
 ## Training
 
-This model was trained using the ProteinSST pipeline with:
-- **Loss Function**: Focal Loss (γ=2.0) with class weights for imbalance
+"""
+    
+    # Add loss type specific information
+    loss_type = config.get('loss_type', 'focal') if config else 'focal'
+    if loss_type == 'crf':
+        card += """This model was trained using the ProteinSST pipeline with:
+- **Loss Function**: CRF Negative Log-Likelihood (models label transitions)
+- **Decoding**: Viterbi algorithm for optimal sequence prediction
+- **Multi-task Learning**: Joint Q8 and Q3 prediction with independent CRF layers
+- **Early Stopping**: Based on harmonic mean of Q8 and Q3 macro F1
+- **Data Augmentation**: Sequence masking, similar AA substitution
+
+> **Note**: For inference, use the `MultiTaskCRFLoss.decode()` method for Viterbi decoding
+> instead of `argmax()` to get optimal label sequences that respect transition constraints.
+
+"""
+    else:
+        focal_gamma = config.get('focal_gamma', 2.0) if config else 2.0
+        card += f"""This model was trained using the ProteinSST pipeline with:
+- **Loss Function**: Focal Loss (γ={focal_gamma}) with class weights for imbalance
 - **Multi-task Learning**: Joint Q8 and Q3 prediction
 - **Early Stopping**: Based on harmonic mean of Q8 and Q3 macro F1
 - **Data Augmentation**: Sequence masking, similar AA substitution
 
-### Training Data
+"""
+    
+    card += """### Training Data
 - ~7,262 protein sequences from CB513/CASP datasets
 - 10% validation split (stratified by sequence length)
 - Excluded 1 high-similarity pair for leakage prevention
@@ -428,24 +453,103 @@ This model is released under the GPL-3.0 License.
 
 
 def _get_tier_info(model_name: str, config: Optional[Dict]) -> Dict[str, str]:
-    """Get model-specific information for model card."""
+    """Get model-specific information for model card based on tier and config."""
     
-    # Only ESM2FineTune is supported
-    return {
-        'architecture': 'Fine-tuned ESM-2',
-        'description': 'Fine-tuned ESM-2 protein language model with task-specific classification heads.',
-        'features': """- Pre-trained on 250M+ protein sequences
+    model_name_lower = model_name.lower()
+    
+    # Detect tier from model name or config
+    if 'tier3' in model_name_lower or (config and 'rnn_type' in config):
+        # Tier 3: CNN + RNN
+        cnn_type = config.get('cnn_type', 'multiscale') if config else 'multiscale'
+        rnn_type = config.get('rnn_type', 'lstm') if config else 'lstm'
+        return {
+            'architecture': f'{cnn_type.title()}CNN + Bi{rnn_type.upper()}',
+            'description': f"""Tier 3 model combining CNN for local pattern extraction with bidirectional {rnn_type.upper()} for sequential modeling.
+
+**Architecture Flow:**
+```
+PLM Embeddings → {cnn_type.title()}CNN → Bi{rnn_type.upper()} → MTL Head → Q8/Q3
+```""",
+            'features': f"""- PLM embeddings ({config.get('plm_name', 'ESM-2') if config else 'ESM-2'})
+- {cnn_type.title()} CNN for local motif extraction
+- Bidirectional {rnn_type.upper()} for sequential dependencies
+- Multi-task classification head
+- Supports CRF loss for label transition modeling""",
+            'q3_range': '88-92%',
+            'q8_range': '74-80%',
+            'class_name': 'Tier3CNNRNN',
+            'import_statement': 'from src.models import Tier3CNNRNN',
+            'input_prep': """# PLM embeddings required
+from src.data import HDF5EmbeddingDataset
+# Load pre-computed embeddings or extract on-the-fly""",
+        }
+    
+    elif 'tier2' in model_name_lower or (config and 'cnn_type' in config and 'rnn_type' not in config):
+        # Tier 2: CNN only
+        cnn_type = config.get('cnn_type', 'multiscale') if config else 'multiscale'
+        return {
+            'architecture': f'{cnn_type.title()}CNN',
+            'description': f"""Tier 2 model using {cnn_type} CNN for local pattern extraction.
+
+**Architecture Flow:**
+```
+PLM Embeddings → {cnn_type.title()}CNN → MTL Head → Q8/Q3
+```""",
+            'features': f"""- PLM embeddings ({config.get('plm_name', 'ESM-2') if config else 'ESM-2'})
+- {cnn_type.title()} CNN with {'multiple kernel sizes' if cnn_type == 'multiscale' else 'dilated convolutions'}
+- Multi-task classification head
+- Supports CRF loss for label transition modeling""",
+            'q3_range': '86-90%',
+            'q8_range': '72-78%',
+            'class_name': 'Tier2CNN',
+            'import_statement': 'from src.models import Tier2CNN',
+            'input_prep': """# PLM embeddings required
+from src.data import HDF5EmbeddingDataset
+# Load pre-computed embeddings""",
+        }
+    
+    elif 'tier1' in model_name_lower or (config and 'fc_hidden' in config and 'cnn_type' not in config):
+        # Tier 1: Baseline FC
+        return {
+            'architecture': 'PLM + FC Baseline',
+            'description': """Tier 1 baseline model with frozen PLM embeddings and feed-forward classification.
+
+**Architecture Flow:**
+```
+PLM Embeddings → Linear → GELU → LayerNorm → MTL Head → Q8/Q3
+```""",
+            'features': f"""- PLM embeddings ({config.get('plm_name', 'ESM-2') if config else 'ESM-2'})
+- Simple feed-forward feature projection
+- Multi-task classification head
+- Supports CRF loss for label transition modeling
+- Lightweight (~500K parameters)""",
+            'q3_range': '84-88%',
+            'q8_range': '68-74%',
+            'class_name': 'Tier1Baseline',
+            'import_statement': 'from src.models import Tier1Baseline',
+            'input_prep': """# PLM embeddings required
+from src.data import HDF5EmbeddingDataset
+# Load pre-computed embeddings""",
+        }
+    
+    else:
+        # Fallback: assume ESM2 fine-tune or generic
+        return {
+            'architecture': 'Fine-tuned ESM-2',
+            'description': 'Fine-tuned ESM-2 protein language model with task-specific classification heads.',
+            'features': """- Pre-trained on 250M+ protein sequences
 - Gradient checkpointing for memory efficiency
 - Layer-wise learning rate decay
-- End-to-end differentiable""",
-        'q3_range': '91-93%',
-        'q8_range': '80-85%',
-        'class_name': 'ESM2FineTune',
-        'import_statement': 'from src.models.esm2_finetune import ESM2FineTune',
-        'input_prep': """# For ESM-2, use tokenizer
+- End-to-end differentiable
+- Supports CRF loss for label transition modeling""",
+            'q3_range': '91-93%',
+            'q8_range': '80-85%',
+            'class_name': 'ESM2FineTune',
+            'import_statement': 'from src.models.esm2_finetune import ESM2FineTune',
+            'input_prep': """# For ESM-2, use tokenizer
 from transformers import EsmTokenizer
 tokenizer = EsmTokenizer.from_pretrained("facebook/esm2_t33_650M_UR50D")
 encoding = tokenizer(sequence, return_tensors='pt')
 input_ids = encoding['input_ids']
 attention_mask = encoding['attention_mask']""",
-    }
+        }

@@ -10,22 +10,9 @@ Provides configurable bidirectional RNN with support for:
 import torch
 import torch.nn as nn
 from typing import Optional, Literal
-from dataclasses import dataclass
 
-
-@dataclass
-class RNNConfig:
-    """Configuration for RNN layer."""
-    rnn_type: str = 'lstm'  # 'lstm', 'gru', 'rnn'
-    hidden_size: int = 256
-    num_layers: int = 2
-    dropout: float = 0.3
-    bidirectional: bool = True
-    
-    def __post_init__(self):
-        valid_types = ['lstm', 'gru', 'rnn']
-        if self.rnn_type not in valid_types:
-            raise ValueError(f"rnn_type must be one of {valid_types}")
+# Import RNNConfig from central config to avoid duplication
+from ..config import RNNConfig
 
 
 class ConfigurableRNN(nn.Module):

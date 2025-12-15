@@ -141,7 +141,8 @@ config = Tier3Config(
     
     # Tracking (enabled by default)
     use_tracking=True,
-    
+    trackio_space_id='thethinkmachine/trackio',
+    hub_model_id=f'thethinkmachine/ProteinSST-{PLM_NAME}-{CNN_TYPE}-{RNN_TYPE}',
     experiment_name=f'tier3_{PLM_NAME}_{CNN_TYPE}_{RNN_TYPE}',
 )
 
@@ -302,6 +303,8 @@ trainer = Trainer(
     gradient_clip=config.gradient_clip,
     use_amp=torch.cuda.is_available(),
     use_tracking=config.use_tracking,
+    trackio_space_id=config.trackio_space_id,
+    hub_model_id=config.hub_model_id,
     experiment_name=config.experiment_name,
     training_config=config.__dict__,
 )

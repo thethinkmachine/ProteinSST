@@ -9,20 +9,9 @@ Two strategies for MTL:
 import torch
 import torch.nn as nn
 from typing import Tuple, Optional, Literal
-from dataclasses import dataclass
 
-
-@dataclass
-class HeadConfig:
-    """Configuration for classification head."""
-    strategy: str = 'q3discarding'  # 'q3discarding' or 'q3guided'
-    fc_hidden: int = 512
-    fc_dropout: float = 0.1
-    
-    def __post_init__(self):
-        valid_strategies = ['q3discarding', 'q3guided']
-        if self.strategy not in valid_strategies:
-            raise ValueError(f"strategy must be one of {valid_strategies}")
+# Import HeadConfig from central config to avoid duplication
+from ..config import HeadConfig
 
 
 class OutputProjection(nn.Module):

@@ -161,7 +161,7 @@ class TrainingConfig:
     q3_loss_weight: float = 0.5
     
     # Augmentation (1-5)
-    augmentation_level: int = 2
+    augmentation_level: int = 1
     
     # Checkpointing
     checkpoint_dir: str = 'checkpoints'
@@ -170,6 +170,7 @@ class TrainingConfig:
     # Logging & Tracking
     log_every: int = 100
     use_tracking: bool = False
+    trackio_space_id: Optional[str] = None
     experiment_name: str = 'protein_sst'
     
     # HuggingFace Hub
@@ -222,6 +223,11 @@ class RNNConfig:
     num_layers: int = 2
     dropout: float = 0.3
     bidirectional: bool = True
+    
+    def __post_init__(self):
+        valid_types = ['lstm', 'gru', 'rnn']
+        if self.rnn_type not in valid_types:
+            raise ValueError(f"rnn_type must be one of {valid_types}")
 
 
 @dataclass
@@ -230,6 +236,11 @@ class HeadConfig:
     strategy: str = 'q3discarding'  # 'q3discarding' or 'q3guided'
     fc_hidden: int = 256
     fc_dropout: float = 0.1
+    
+    def __post_init__(self):
+        valid_strategies = ['q3discarding', 'q3guided']
+        if self.strategy not in valid_strategies:
+            raise ValueError(f"strategy must be one of {valid_strategies}")
 
 
 # =============================================================================
