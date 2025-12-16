@@ -507,6 +507,7 @@ trainer = Trainer(
     gradient_clip=config.gradient_clip,
     log_every=100,
     use_amp=torch.cuda.is_available(),
+    frozen_plm=FROZEN_PLM,  # Pass mode to Trainer
     use_tracking=False,  # Disabled for Kaggle
 )
 

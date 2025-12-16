@@ -415,6 +415,7 @@ trainer = Trainer(
     gradient_clip=config.gradient_clip,
     log_every=100,
     use_amp=torch.cuda.is_available(),
+    frozen_plm=FROZEN_PLM,
     use_tracking=config.use_tracking,
     trackio_space_id=config.trackio_space_id,
     hub_model_id=config.hub_model_id,

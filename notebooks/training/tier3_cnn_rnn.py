@@ -370,6 +370,7 @@ trainer = Trainer(
     checkpoint_dir=config.checkpoint_dir,
     gradient_clip=config.gradient_clip,
     use_amp=torch.cuda.is_available(),
+    frozen_plm=FROZEN_PLM,
     use_tracking=config.use_tracking,
     trackio_space_id=config.trackio_space_id,
     hub_model_id=config.hub_model_id,

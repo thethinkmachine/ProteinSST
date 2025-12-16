@@ -82,6 +82,8 @@ class Trainer:
     """
     Unified training class for all model tiers.
     
+    Supports both frozen (pre-extracted embeddings) and FFT (full fine-tuning) modes.
+    
     Args:
         model: PyTorch model with forward(x) -> (q8_logits, q3_logits)
         train_loader: Training DataLoader
@@ -94,6 +96,7 @@ class Trainer:
         gradient_clip: Maximum gradient norm
         log_every: Log training metrics every N batches
         use_amp: Use automatic mixed precision (FP16)
+        frozen_plm: If True, use pre-extracted embeddings (features). If False, use raw sequences (FFT mode).
         use_tracking: Use Weights & Biases/Trackio for tracking
         experiment_name: Name of the experiment
         trackio_space_id: HuggingFace Space ID for remote tracking (e.g., 'username/trackio')
@@ -114,6 +117,7 @@ class Trainer:
         gradient_clip: float = 1.0,
         log_every: int = 100,
         use_amp: bool = False,
+        frozen_plm: bool = True,
         # Tracking & Hub
         use_tracking: bool = False,
         experiment_name: str = 'protein_sst',
@@ -132,6 +136,7 @@ class Trainer:
         self.gradient_clip = gradient_clip
         self.log_every = log_every
         self.use_amp = use_amp
+        self.frozen_plm = frozen_plm
         
         # Tracking & Hub
         self.use_tracking = use_tracking
@@ -177,7 +182,14 @@ class Trainer:
         pbar = tqdm(self.train_loader, desc=f'Epoch {self.current_epoch}')
         
         for batch_idx, batch in enumerate(pbar):
-            features = batch['features'].to(self.device)
+            # Handle both frozen (features) and FFT (sequences) modes
+            if self.frozen_plm:
+                features = batch['features'].to(self.device)
+                batch_size = features.size(0)
+            else:
+                sequences = batch['sequences']  # List of strings, not tensor
+                batch_size = len(sequences)
+            
             q8_targets = batch['sst8'].to(self.device)
             q3_targets = batch['sst3'].to(self.device)
             
@@ -186,7 +198,10 @@ class Trainer:
             # Forward pass with optional AMP
             if self.use_amp:
                 with torch.amp.autocast(device_type='cuda'):
-                    q8_logits, q3_logits = self.model(features)
+                    if self.frozen_plm:
+                        q8_logits, q3_logits = self.model(features)
+                    else:
+                        q8_logits, q3_logits = self.model(sequences=sequences)
                     loss, q8_loss, q3_loss = self.loss_fn(
                         q8_logits, q8_targets, q3_logits, q3_targets
                     )
@@ -197,7 +212,10 @@ class Trainer:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
-                q8_logits, q3_logits = self.model(features)
+                if self.frozen_plm:
+                    q8_logits, q3_logits = self.model(features)
+                else:
+                    q8_logits, q3_logits = self.model(sequences=sequences)
                 loss, q8_loss, q3_loss = self.loss_fn(
                     q8_logits, q8_targets, q3_logits, q3_targets
                 )
@@ -211,7 +229,6 @@ class Trainer:
                 self.scheduler.step()
             
             # Tracking
-            batch_size = features.size(0)
             total_loss += loss.item() * batch_size
             total_q8_loss += q8_loss.item() * batch_size
             total_q3_loss += q3_loss.item() * batch_size
@@ -263,17 +280,23 @@ class Trainer:
         use_crf = isinstance(self.loss_fn, MultiTaskCRFLoss)
         
         for batch in self.val_loader:
-            features = batch['features'].to(self.device)
+            # Handle both frozen (features) and FFT (sequences) modes
+            if self.frozen_plm:
+                features = batch['features'].to(self.device)
+                batch_size = features.size(0)
+                q8_logits, q3_logits = self.model(features)  # (B, L, C)
+            else:
+                sequences = batch['sequences']  # List of strings
+                batch_size = len(sequences)
+                q8_logits, q3_logits = self.model(sequences=sequences)  # (B, L, C)
+            
             q8_targets = batch['sst8'].to(self.device)   # (B, L)
             q3_targets = batch['sst3'].to(self.device)   # (B, L)
-            
-            q8_logits, q3_logits = self.model(features)  # (B, L, C)
             
             loss, q8_loss, q3_loss = self.loss_fn(
                 q8_logits, q8_targets, q3_logits, q3_targets
             )
             
-            batch_size = features.size(0)
             total_loss += loss.item() * batch_size
             total_q8_loss += q8_loss.item() * batch_size
             total_q3_loss += q3_loss.item() * batch_size
