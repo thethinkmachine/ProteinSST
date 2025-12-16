@@ -101,7 +101,7 @@ print("─" * 50)
 # CONFIGURATION - Modify these values
 # ═══════════════════════════════════════════════════════════════════
 
-PLM_NAME = 'esm2_35m'  # Options: 'esm2_8m', 'esm2_35m', 'esm2_650m', 'protbert'
+PLM_NAME = 'protbert'  # Options: 'esm2_8m', 'esm2_35m', 'esm2_650m', 'protbert'
 
 config = Tier1Config(
     # PLM Selection
@@ -113,7 +113,7 @@ config = Tier1Config(
     fc_dropout=0.1,
     
     # MTL Head Strategy: 'q3discarding' or 'q3guided'
-    head_strategy='q3discarding',
+    head_strategy='q3guided',
     head_hidden=256,
     head_dropout=0.1,
     
@@ -127,7 +127,7 @@ config = Tier1Config(
     gradient_clip=1.0,
     
     # Loss - Options: 'focal', 'weighted_ce', 'label_smoothing', 'ce', 'crf'
-    loss_type='crf',  # Use 'crf' for CRF Negative Log-Likelihood
+    loss_type='focal',  # Use 'crf' for CRF Negative Log-Likelihood
     focal_gamma=1.0,
     q8_loss_weight=1.0,
     q3_loss_weight=0.5,

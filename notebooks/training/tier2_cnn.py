@@ -90,7 +90,7 @@ print("✓ Library modules imported")
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════
 
-PLM_NAME = 'esm2_35m'  # Options: 'esm2_8m', 'esm2_35m', 'esm2_650m', 'protbert'
+PLM_NAME = 'protbert'  # Options: 'esm2_8m', 'esm2_35m', 'esm2_650m', 'protbert'
 CNN_TYPE = 'multiscale'  # Options: 'multiscale' or 'deep'
 
 config = Tier2Config(
@@ -115,7 +115,7 @@ config = Tier2Config(
     cnn_dropout=0.0,
     
     # MTL Head
-    head_strategy='q3discarding',
+    head_strategy='q3guided',
     head_hidden=256,
     head_dropout=0.1,
     
@@ -129,7 +129,7 @@ config = Tier2Config(
     gradient_clip=1.0,
     
     # Loss - Options: 'focal', 'weighted_ce', 'label_smoothing', 'ce', 'crf'
-    loss_type='crf',  # Use 'crf' for CRF Negative Log-Likelihood
+    loss_type='focal',  # Use 'crf' for CRF Negative Log-Likelihood
     focal_gamma=1.0,
     q8_loss_weight=1.0,
     q3_loss_weight=0.5,

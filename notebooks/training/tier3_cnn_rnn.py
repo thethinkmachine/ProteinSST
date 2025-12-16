@@ -91,7 +91,7 @@ print("✓ Library modules imported")
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════
 
-PLM_NAME = 'esm2_35m'  # Options: 'esm2_8m', 'esm2_35m', 'esm2_650m', 'protbert'
+PLM_NAME = 'protbert'  # Options: 'esm2_8m', 'esm2_35m', 'esm2_650m', 'protbert'
 CNN_TYPE = 'multiscale'  # Options: 'multiscale' or 'deep'
 RNN_TYPE = 'lstm'  # Options: 'lstm', 'gru', or 'rnn'
 
@@ -101,6 +101,7 @@ config = Tier3Config(
     embeddings_path=f'../../data/embeddings/{PLM_NAME}.h5',
     
     # CNN
+    skip_cnn=False,
     cnn_type=CNN_TYPE,
     kernel_sizes=[3, 5, 7],
     cnn_out_channels=64,
