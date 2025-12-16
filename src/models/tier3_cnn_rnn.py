@@ -1,11 +1,15 @@
 """
-Tier 3: CNN + RNN Model - Frozen PLM Embeddings → CNN → RNN → Classification Head
+Tier 3: CNN + RNN Model - PLM Embeddings → CNN → RNN → Classification Head
+
+Supports two modes:
+- frozen_plm=True (default): Uses pre-extracted PLM embeddings from HDF5
+- frozen_plm=False (FFT): Includes PLM backbone, trained end-to-end
 
 Uses CNNs to extract local motifs, then RNNs for sequential modeling.
 Supports MultiscaleCNN or DeepCNN, and LSTM/GRU/RNN variants.
 
 Architecture:
-    PLM Embeddings (L, D_plm) → CNN Block → BiLSTM/BiGRU/BiRNN → MTL Head → Q8/Q3
+    [PLM Backbone (optional)] → PLM Embeddings (L, D_plm) → CNN Block → BiLSTM/BiGRU/BiRNN → MTL Head → Q8/Q3
 """
 
 import torch
@@ -19,10 +23,11 @@ from .classification_heads import MTLClassificationHead, HeadConfig
 
 class Tier3CNNRNN(nn.Module):
     """
-    Tier 3: CNN + RNN model using frozen PLM embeddings.
+    Tier 3: CNN + RNN model using PLM embeddings.
     
     Combines local motif extraction (CNN) with sequential modeling (RNN).
     Most expressive architecture with the highest capacity.
+    Supports both frozen (pre-extracted) and fine-tuned PLM modes.
     
     Args:
         embedding_dim: PLM embedding dimension
@@ -47,9 +52,13 @@ class Tier3CNNRNN(nn.Module):
         head_strategy: MTL head strategy
         head_hidden: Hidden dimension for classification head
         head_dropout: Dropout for classification head
+        # FFT Mode
+        frozen_plm: If True, expects pre-extracted embeddings. If False, includes PLM backbone.
+        plm_name: Name of PLM to use for FFT mode
+        gradient_checkpointing: Enable gradient checkpointing for PLM
         
     Example:
-        # With CNN
+        # Frozen mode - With CNN
         model = Tier3CNNRNN(
             embedding_dim=768,
             cnn_type='multiscale',
@@ -58,9 +67,10 @@ class Tier3CNNRNN(nn.Module):
             rnn_hidden=256,
         )
         
-        # Without CNN (PLM -> RNN directly)
+        # FFT mode - Without CNN (PLM -> RNN directly)
         model = Tier3CNNRNN(
-            embedding_dim=768,
+            frozen_plm=False,
+            plm_name='protbert',
             skip_cnn=True,
             rnn_type='lstm',
             rnn_hidden=256,
@@ -92,21 +102,39 @@ class Tier3CNNRNN(nn.Module):
         head_strategy: str = 'q3discarding',
         head_hidden: int = 256,
         head_dropout: float = 0.1,
+        # FFT Mode
+        frozen_plm: bool = True,
+        plm_name: str = 'protbert',
+        gradient_checkpointing: bool = False,
     ):
         super().__init__()
         
-        self.embedding_dim = embedding_dim
+        self.frozen_plm = frozen_plm
+        self.plm_name = plm_name
         self.skip_cnn = skip_cnn
         self.cnn_type = cnn_type if not skip_cnn else None
         self.rnn_type = rnn_type
         
+        # PLM Backbone (only for FFT mode)
+        if not frozen_plm:
+            from .plm_backbone import PLMBackbone
+            self.plm_backbone = PLMBackbone(
+                plm_name=plm_name,
+                freeze=False,
+                gradient_checkpointing=gradient_checkpointing,
+            )
+            self.embedding_dim = self.plm_backbone.embedding_dim
+        else:
+            self.plm_backbone = None
+            self.embedding_dim = embedding_dim
+        
         # Build CNN (only if not skipping)
         if skip_cnn:
             self.cnn = None
-            rnn_input_dim = embedding_dim
+            rnn_input_dim = self.embedding_dim
         elif cnn_type == 'multiscale':
             self.cnn = MultiscaleCNN(
-                in_channels=embedding_dim,
+                in_channels=self.embedding_dim,
                 layer_configs=cnn_configs,
                 kernel_sizes=kernel_sizes or [3, 5, 7],
                 out_channels=cnn_out_channels,
@@ -117,7 +145,7 @@ class Tier3CNNRNN(nn.Module):
             rnn_input_dim = self.cnn.out_channels
         elif cnn_type == 'deep':
             self.cnn = DeepCNN(
-                in_channels=embedding_dim,
+                in_channels=self.embedding_dim,
                 layer_configs=cnn_configs,
                 num_layers=cnn_num_layers,
                 hidden_channels=cnn_out_channels,
@@ -155,8 +183,10 @@ class Tier3CNNRNN(nn.Module):
         self._init_weights()
     
     def _init_weights(self):
-        """Initialize weights."""
-        for module in self.modules():
+        """Initialize weights (excluding PLM backbone)."""
+        for name, module in self.named_modules():
+            if 'plm_backbone' in name:
+                continue  # Skip PLM backbone
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
@@ -166,17 +196,18 @@ class Tier3CNNRNN(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
             elif isinstance(module, (nn.LSTM, nn.GRU, nn.RNN)):
-                for name, param in module.named_parameters():
-                    if 'weight_ih' in name:
+                for pname, param in module.named_parameters():
+                    if 'weight_ih' in pname:
                         nn.init.xavier_uniform_(param)
-                    elif 'weight_hh' in name:
+                    elif 'weight_hh' in pname:
                         nn.init.orthogonal_(param)
-                    elif 'bias' in name:
+                    elif 'bias' in pname:
                         nn.init.zeros_(param)
     
     def forward(
         self,
-        features: torch.Tensor,
+        features: torch.Tensor = None,
+        sequences: List[str] = None,
         lengths: Optional[torch.Tensor] = None,
         return_q3: bool = True,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -184,16 +215,27 @@ class Tier3CNNRNN(nn.Module):
         Forward pass.
         
         Args:
-            features: PLM embeddings of shape (batch, seq_len, embedding_dim)
+            features: PLM embeddings of shape (batch, seq_len, embedding_dim) - for frozen mode
+            sequences: List of protein sequences (strings) - for FFT mode
             lengths: Optional sequence lengths (not used currently)
             return_q3: Whether to compute Q3 predictions
             
         Returns:
             Tuple of (q8_logits, q3_logits or None)
         """
+        # Get embeddings from PLM backbone or use provided features
+        if not self.frozen_plm:
+            if sequences is None:
+                raise ValueError("sequences required for FFT mode (frozen_plm=False)")
+            x = self.plm_backbone(sequences=sequences)
+        else:
+            if features is None:
+                raise ValueError("features required for frozen mode (frozen_plm=True)")
+            x = features
+        
         # CNN: (batch, seq_len, channels) -> (batch, seq_len, cnn_out)
         # Skip CNN if configured
-        x = features if self.skip_cnn else self.cnn(features)
+        x = x if self.skip_cnn else self.cnn(x)
         
         # RNN: (batch, seq_len, input_dim) -> (batch, seq_len, rnn_out)
         x = self.rnn(x, lengths)
@@ -208,3 +250,11 @@ class Tier3CNNRNN(nn.Module):
         if trainable_only:
             return sum(p.numel() for p in self.parameters() if p.requires_grad)
         return sum(p.numel() for p in self.parameters())
+    
+    def count_head_parameters(self) -> int:
+        """Count parameters excluding PLM backbone (for comparison)."""
+        total = 0
+        for name, param in self.named_parameters():
+            if 'plm_backbone' not in name and param.requires_grad:
+                total += param.numel()
+        return total

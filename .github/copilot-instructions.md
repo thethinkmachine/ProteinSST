@@ -2,11 +2,11 @@
 
 ## Project Overview
 
-ProteinSST is a deep learning pipeline for **protein secondary structure prediction** (SST). It predicts 8-state (Q8: G,H,I,E,B,T,S,C) and 3-state (Q3: H,E,C) secondary structures from amino acid sequences using frozen PLM embeddings.
+ProteinSST is a deep learning pipeline for **protein secondary structure prediction** (SST). It predicts 8-state (Q8: G,H,I,E,B,T,S,C) and 3-state (Q3: H,E,C) secondary structures from amino acid sequences.
 
 ## Architecture: Tiered Model Design
 
-Models follow a progressive complexity hierarchy—always build on frozen PLM embeddings:
+Models follow a progressive complexity hierarchy with two training modes:
 
 | Tier | Architecture | Key Files |
 |------|-------------|-----------|
@@ -15,6 +15,56 @@ Models follow a progressive complexity hierarchy—always build on frozen PLM em
 | **Tier 3** | PLM → CNN → RNN → MTL Head | `src/models/tier3_cnn_rnn.py` |
 
 **All models output a tuple `(q8_logits, q3_logits)`** via the MTL classification head.
+
+## Training Modes: Frozen vs FFT
+
+The `frozen_plm` flag controls training mode:
+
+| Mode | `frozen_plm` | Description |
+|------|-------------|-------------|
+| **Frozen** (default) | `True` | Uses pre-extracted PLM embeddings from HDF5. Memory efficient, fast training. |
+| **Full Fine-Tuning (FFT)** | `False` | PLM is trained end-to-end. Higher GPU memory, better accuracy potential. |
+
+### Frozen Mode (Default)
+```python
+from src.config import Tier1Config
+config = Tier1Config(plm_name='protbert', frozen_plm=True)
+
+# Data loading
+from src.data import HDF5EmbeddingDataset, collate_fn
+dataset = HDF5EmbeddingDataset('data/embeddings/protbert.h5', ...)
+loader = DataLoader(dataset, collate_fn=collate_fn)
+
+# Model forward
+model = Tier1Baseline(embedding_dim=1024, frozen_plm=True)
+q8, q3 = model(features)  # features: (batch, seq_len, dim)
+```
+
+### FFT Mode
+```python
+from src.config import Tier1Config
+config = Tier1Config(
+    plm_name='protbert',
+    frozen_plm=False,
+    gradient_checkpointing=True,  # Save memory
+    batch_size=8,  # Smaller batch for FFT
+    learning_rate=1e-5,  # Lower LR for FFT
+)
+
+# Data loading
+from src.models import SequenceDataset, collate_fn_sequences
+dataset = SequenceDataset('data/train.csv', ...)
+loader = DataLoader(dataset, collate_fn=collate_fn_sequences, num_workers=0)
+
+# Model forward
+model = Tier1Baseline(
+    embedding_dim=1024,
+    frozen_plm=False,
+    plm_name='protbert',
+    gradient_checkpointing=True,
+)
+q8, q3 = model(sequences=sequences)  # sequences: list of strings
+```
 
 ## Critical Patterns
 
@@ -30,11 +80,12 @@ from src.config import Tier1Config
 config = Tier1Config(plm_name='protbert', batch_size=32)
 ```
 
-### PLM Embeddings (Frozen)
-Embeddings are pre-extracted to HDF5 files in `data/embeddings/`. Use `HDF5EmbeddingDataset` from `src/data.py`:
+### PLM Backbone (FFT Mode)
+The `PLMBackbone` class in `src/models/plm_backbone.py` wraps ESM-2/ProtBert models:
 ```python
-from src.data import HDF5EmbeddingDataset, collate_fn
-dataset = HDF5EmbeddingDataset('data/embeddings/protbert.h5', exclude_ids=LEAKAGE_TRAIN_IDS)
+from src.models import PLMBackbone
+backbone = PLMBackbone(plm_name='protbert', freeze=False, gradient_checkpointing=True)
+embeddings = backbone(sequences)  # sequences: list of AA strings
 ```
 
 **Supported PLMs** (see `src/plm_registry.py`):
@@ -46,6 +97,8 @@ Always exclude high-similarity sequences from training:
 ```python
 from src.config import LEAKAGE_TRAIN_IDS
 dataset = HDF5EmbeddingDataset(..., exclude_ids=LEAKAGE_TRAIN_IDS)
+# or for FFT mode:
+dataset = SequenceDataset(..., exclude_ids=LEAKAGE_TRAIN_IDS)
 ```
 
 ## Loss Functions
@@ -75,11 +128,12 @@ trainer.train(max_epochs=50, patience=10)
 ## Key Commands
 
 ```bash
-# Extract PLM embeddings (required before training)
+# Extract PLM embeddings (required for frozen mode)
 python scripts/extract_embeddings.py --plm protbert --output data/embeddings/protbert.h5
 
 # Training notebooks are in notebooks/training/
 # Run cells sequentially in tier1_baseline.ipynb, tier2_cnn.ipynb, tier3_cnn_rnn.ipynb
+# Set FROZEN_PLM = True/False to switch between modes
 ```
 
 ## File Organization
@@ -87,6 +141,7 @@ python scripts/extract_embeddings.py --plm protbert --output data/embeddings/pro
 - `src/config.py` - All constants, class mappings, tier configs
 - `src/data.py` - `ProteinDataset`, `HDF5EmbeddingDataset`, encoding utilities
 - `src/models/` - Tier architectures + building blocks (CNN, RNN, heads)
+- `src/models/plm_backbone.py` - `PLMBackbone`, `SequenceDataset` for FFT mode
 - `src/training.py` - `Trainer` class with checkpointing, early stopping
 - `src/metrics.py` - Q3/Q8 accuracy, per-class metrics, SOV score
 - `src/hub.py` - HuggingFace Hub push/pull utilities
@@ -98,3 +153,4 @@ python scripts/extract_embeddings.py --plm protbert --output data/embeddings/pro
 2. **Ignore index**: Use `-100` for padding in loss computation
 3. **Class weights**: Pre-computed inverse-frequency weights in `src/config.py` (`SST8_WEIGHTS`, `SST3_WEIGHTS`)
 4. **Notebook imports**: Always add `sys.path.insert(0, '../..')` to access `src/`
+5. **FFT Naming**: Checkpoints/experiments with `_fft` suffix indicate FFT-trained models

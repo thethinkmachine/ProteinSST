@@ -1,11 +1,15 @@
 """
-Tier 2: CNN Model - Frozen PLM Embeddings → CNN → Classification Head
+Tier 2: CNN Model - PLM Embeddings → CNN → Classification Head
+
+Supports two modes:
+- frozen_plm=True (default): Uses pre-extracted PLM embeddings from HDF5
+- frozen_plm=False (FFT): Includes PLM backbone, trained end-to-end
 
 Uses CNNs to extract local motifs from PLM embeddings.
 Supports MultiscaleCNN (wider) or DeepCNN (deeper) architectures.
 
 Architecture:
-    PLM Embeddings (L, D_plm) → CNN Block → MTL Head → Q8/Q3
+    [PLM Backbone (optional)] → PLM Embeddings (L, D_plm) → CNN Block → MTL Head → Q8/Q3
 """
 
 import torch
@@ -18,9 +22,10 @@ from .classification_heads import MTLClassificationHead, HeadConfig
 
 class Tier2CNN(nn.Module):
     """
-    Tier 2: CNN model using frozen PLM embeddings.
+    Tier 2: CNN model using PLM embeddings.
     
     Extracts local motifs from PLM embeddings using multiscale or deep CNNs.
+    Supports both frozen (pre-extracted) and fine-tuned PLM modes.
     
     Args:
         embedding_dim: PLM embedding dimension
@@ -39,21 +44,25 @@ class Tier2CNN(nn.Module):
         head_strategy: MTL head strategy
         head_hidden: Hidden dimension for classification head
         head_dropout: Dropout for classification head
+        # FFT Mode
+        frozen_plm: If True, expects pre-extracted embeddings. If False, includes PLM backbone.
+        plm_name: Name of PLM to use for FFT mode
+        gradient_checkpointing: Enable gradient checkpointing for PLM
         
     Example:
-        # Multiscale CNN
+        # Frozen mode - Multiscale CNN
         model = Tier2CNN(
             embedding_dim=768,
             cnn_type='multiscale',
             kernel_sizes=[3, 5, 7, 11],
         )
         
-        # Deep CNN
+        # FFT mode - Deep CNN
         model = Tier2CNN(
-            embedding_dim=768,
+            frozen_plm=False,
+            plm_name='protbert',
             cnn_type='deep',
             cnn_num_layers=4,
-            cnn_dilations=[1, 2, 4, 8],
         )
     """
     
@@ -77,16 +86,34 @@ class Tier2CNN(nn.Module):
         head_strategy: str = 'q3discarding',
         head_hidden: int = 256,
         head_dropout: float = 0.1,
+        # FFT Mode
+        frozen_plm: bool = True,
+        plm_name: str = 'protbert',
+        gradient_checkpointing: bool = False,
     ):
         super().__init__()
         
-        self.embedding_dim = embedding_dim
+        self.frozen_plm = frozen_plm
+        self.plm_name = plm_name
         self.cnn_type = cnn_type
+        
+        # PLM Backbone (only for FFT mode)
+        if not frozen_plm:
+            from .plm_backbone import PLMBackbone
+            self.plm_backbone = PLMBackbone(
+                plm_name=plm_name,
+                freeze=False,
+                gradient_checkpointing=gradient_checkpointing,
+            )
+            self.embedding_dim = self.plm_backbone.embedding_dim
+        else:
+            self.plm_backbone = None
+            self.embedding_dim = embedding_dim
         
         # Build CNN
         if cnn_type == 'multiscale':
             self.cnn = MultiscaleCNN(
-                in_channels=embedding_dim,
+                in_channels=self.embedding_dim,
                 layer_configs=cnn_configs,
                 kernel_sizes=kernel_sizes or [3, 5, 7, 11],
                 out_channels=cnn_out_channels,
@@ -96,7 +123,7 @@ class Tier2CNN(nn.Module):
             )
         elif cnn_type == 'deep':
             self.cnn = DeepCNN(
-                in_channels=embedding_dim,
+                in_channels=self.embedding_dim,
                 layer_configs=cnn_configs,
                 num_layers=cnn_num_layers,
                 hidden_channels=cnn_out_channels,
@@ -123,8 +150,10 @@ class Tier2CNN(nn.Module):
         self._init_weights()
     
     def _init_weights(self):
-        """Initialize weights."""
-        for module in self.modules():
+        """Initialize weights (excluding PLM backbone)."""
+        for name, module in self.named_modules():
+            if 'plm_backbone' in name:
+                continue  # Skip PLM backbone
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
@@ -136,21 +165,33 @@ class Tier2CNN(nn.Module):
     
     def forward(
         self,
-        features: torch.Tensor,
+        features: torch.Tensor = None,
+        sequences: List[str] = None,
         return_q3: bool = True,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward pass.
         
         Args:
-            features: PLM embeddings of shape (batch, seq_len, embedding_dim)
+            features: PLM embeddings of shape (batch, seq_len, embedding_dim) - for frozen mode
+            sequences: List of protein sequences (strings) - for FFT mode
             return_q3: Whether to compute Q3 predictions
             
         Returns:
             Tuple of (q8_logits, q3_logits or None)
         """
+        # Get embeddings from PLM backbone or use provided features
+        if not self.frozen_plm:
+            if sequences is None:
+                raise ValueError("sequences required for FFT mode (frozen_plm=False)")
+            x = self.plm_backbone(sequences=sequences)
+        else:
+            if features is None:
+                raise ValueError("features required for frozen mode (frozen_plm=True)")
+            x = features
+        
         # CNN expects (batch, seq_len, channels), outputs same shape
-        x = self.cnn(features)
+        x = self.cnn(x)
         
         # Classification
         q8_logits, q3_logits = self.head(x, return_q3=return_q3)
@@ -162,3 +203,11 @@ class Tier2CNN(nn.Module):
         if trainable_only:
             return sum(p.numel() for p in self.parameters() if p.requires_grad)
         return sum(p.numel() for p in self.parameters())
+    
+    def count_head_parameters(self) -> int:
+        """Count parameters excluding PLM backbone (for comparison)."""
+        total = 0
+        for name, param in self.named_parameters():
+            if 'plm_backbone' not in name and param.requires_grad:
+                total += param.numel()
+        return total

@@ -1,5 +1,8 @@
 # ProteinSST - Models Package
 
+# PLM Backbone (for FFT mode)
+from .plm_backbone import PLMBackbone, SequenceDataset, collate_fn_sequences
+
 # Building blocks
 from .cnn_blocks import (
     CNNLayerConfig,

@@ -252,12 +252,18 @@ class Tier1Config(TrainingConfig):
     """
     Tier 1: Baseline configuration.
     PLM Embeddings → FC → MTL Head
+    
+    Supports two modes via frozen_plm flag:
+    - frozen_plm=True (default): Uses pre-extracted PLM embeddings
+    - frozen_plm=False (FFT): Full Fine-Tuning with PLM backbone
     """
     model_name: str = 'tier1_baseline'
     
-    # PLM
+    # PLM Mode
+    frozen_plm: bool = True  # True = use pre-extracted embeddings, False = FFT
     plm_name: str = 'esm2_35m'
-    embeddings_path: str = 'data/embeddings/esm2_35m.h5'
+    embeddings_path: str = 'data/embeddings/esm2_35m.h5'  # Only used when frozen_plm=True
+    gradient_checkpointing: bool = False  # Only used when frozen_plm=False
     
     # FC layer
     fc_hidden: int = 512
@@ -274,12 +280,18 @@ class Tier2Config(TrainingConfig):
     """
     Tier 2: CNN configuration.
     PLM Embeddings → CNN → MTL Head
+    
+    Supports two modes via frozen_plm flag:
+    - frozen_plm=True (default): Uses pre-extracted PLM embeddings
+    - frozen_plm=False (FFT): Full Fine-Tuning with PLM backbone
     """
     model_name: str = 'tier2_cnn'
     
-    # PLM
+    # PLM Mode
+    frozen_plm: bool = True  # True = use pre-extracted embeddings, False = FFT
     plm_name: str = 'esm2_35m'
-    embeddings_path: str = 'data/embeddings/esm2_35m.h5'
+    embeddings_path: str = 'data/embeddings/esm2_35m.h5'  # Only used when frozen_plm=True
+    gradient_checkpointing: bool = False  # Only used when frozen_plm=False
     
     # CNN
     cnn_type: str = 'multiscale'  # 'multiscale' or 'deep'
@@ -302,14 +314,21 @@ class Tier3Config(TrainingConfig):
     """
     Tier 3: CNN + RNN configuration.
     PLM Embeddings → CNN → BiLSTM/GRU/RNN → MTL Head
+    
+    Supports two modes via frozen_plm flag:
+    - frozen_plm=True (default): Uses pre-extracted PLM embeddings
+    - frozen_plm=False (FFT): Full Fine-Tuning with PLM backbone
     """
     model_name: str = 'tier3_cnn_rnn'
     
-    # PLM
+    # PLM Mode
+    frozen_plm: bool = True  # True = use pre-extracted embeddings, False = FFT
     plm_name: str = 'esm2_35m'
-    embeddings_path: str = 'data/embeddings/esm2_35m.h5'
+    embeddings_path: str = 'data/embeddings/esm2_35m.h5'  # Only used when frozen_plm=True
+    gradient_checkpointing: bool = False  # Only used when frozen_plm=False
     
     # CNN
+    skip_cnn: bool = False  # Skip CNN and pass embeddings directly to RNN
     cnn_type: str = 'multiscale'  # 'multiscale' or 'deep'
     kernel_sizes: List[int] = field(default_factory=lambda: [3, 5, 7])
     cnn_out_channels: int = 64

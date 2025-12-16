@@ -76,7 +76,7 @@ from src.config import (
     get_embedding_dim, PLM_EMBEDDING_DIMS,
 )
 from src.data import HDF5EmbeddingDataset, collate_fn
-from src.models import Tier2CNN
+from src.models import Tier2CNN, SequenceDataset, collate_fn_sequences
 from src.losses import get_multitask_loss
 from src.training import Trainer, create_optimizer, create_scheduler, plot_training_history
 
@@ -96,10 +96,18 @@ CNN_TYPE = 'multiscale'  # Options: 'multiscale' or 'deep'
 # Generate submission.csv from test.csv using trained model
 GENERATE_SUBMISSION = True
 
+# FFT Mode: Set False to train PLM end-to-end (requires more GPU memory)
+# When True, uses pre-extracted frozen embeddings (default, memory efficient)
+FROZEN_PLM = True
+
 config = Tier2Config(
     # PLM Selection
     plm_name=PLM_NAME,
     embeddings_path=f'../../data/embeddings/{PLM_NAME}.h5',
+    
+    # Training Mode
+    frozen_plm=FROZEN_PLM,
+    gradient_checkpointing=not FROZEN_PLM,  # Enable for FFT to save memory
     
     # CNN Architecture
     cnn_type=CNN_TYPE,
@@ -122,13 +130,13 @@ config = Tier2Config(
     head_hidden=256,
     head_dropout=0.1,
     
-    # Training
+    # Training - adjusted for mode
     max_seq_length=512,
-    batch_size=32,
-    learning_rate=1e-4,
+    batch_size=8 if not FROZEN_PLM else 32,  # Smaller batch for FFT
+    learning_rate=1e-5 if not FROZEN_PLM else 1e-4,  # Lower LR for FFT
     weight_decay=0.01,
-    max_epochs=50,
-    patience=10,
+    max_epochs=20 if not FROZEN_PLM else 50,  # Fewer epochs for FFT
+    patience=5 if not FROZEN_PLM else 10,
     gradient_clip=1.0,
     
     # Loss - Options: 'focal', 'weighted_ce', 'label_smoothing', 'ce', 'crf'
@@ -138,20 +146,21 @@ config = Tier2Config(
     q3_loss_weight=0.5,
     
     # Checkpointing
-    checkpoint_dir=f'../../checkpoints/tier2_{PLM_NAME}_{CNN_TYPE}',
+    checkpoint_dir=f'../../checkpoints/tier2_{PLM_NAME}_{CNN_TYPE}' + ('_fft' if not FROZEN_PLM else ''),
     
     # Tracking (enabled by default)
     use_tracking=True,
     trackio_space_id='thethinkmachine/trackio',
-    hub_model_id=f'thethinkmachine/ProteinSST-{PLM_NAME}-{CNN_TYPE}',
-    experiment_name=f'tier2_{PLM_NAME}_{CNN_TYPE}',
+    hub_model_id=f'thethinkmachine/ProteinSST-{PLM_NAME}-{CNN_TYPE}' + ('-fft' if not FROZEN_PLM else ''),
+    experiment_name=f'tier2_{PLM_NAME}_{CNN_TYPE}' + ('_fft' if not FROZEN_PLM else ''),
 )
 
 # %%
 print("\n" + "═" * 60)
 print(f"TIER 2 CNN CONFIGURATION ({CNN_TYPE.upper()})")
 print("═" * 60)
-print(f"\n📦 PLM: {config.plm_name}")
+print(f"\n🔧 Mode: {'Frozen PLM' if config.frozen_plm else '🔥 Full Fine-Tuning (FFT)'}")
+print(f"📦 PLM: {config.plm_name}")
 print(f"   Embedding Dim: {get_embedding_dim(config.plm_name)}")
 print(f"\n🏗️  CNN Architecture:")
 print(f"   Type: {config.cnn_type}")
@@ -164,27 +173,51 @@ else:
     print(f"   Dilations: {config.cnn_dilations}")
     print(f"   Residual: {config.cnn_residual}")
 print(f"\n🎯 Head Strategy: {config.head_strategy}")
+print(f"\n⚡ Training Settings:")
+print(f"   Batch Size: {config.batch_size}")
+print(f"   Learning Rate: {config.learning_rate}")
+print(f"   Max Epochs: {config.max_epochs}")
 print(f"\n📊 Tracking: {'Enabled' if config.use_tracking else 'Disabled'}")
 print("═" * 60)
 
 # %% [markdown]
 # ## 3. Data Loading
+#
+# - **Frozen mode**: Load pre-computed PLM embeddings from HDF5 file
+# - **FFT mode**: Load raw sequences (PLM processes them on-the-fly)
 
 # %%
-embeddings_path = Path(config.embeddings_path)
-if not embeddings_path.exists():
-    print(f"❌ Run: python scripts/extract_embeddings.py --plm {config.plm_name}")
+if config.frozen_plm:
+    embeddings_path = Path(config.embeddings_path)
+    if not embeddings_path.exists():
+        print(f"❌ Run: python scripts/extract_embeddings.py --plm {config.plm_name}")
+    else:
+        print(f"✓ Embeddings: {embeddings_path}")
 else:
-    print(f"✓ Embeddings: {embeddings_path}")
+    print("🔥 FFT Mode: PLM will be trained end-to-end")
+    print(f"   PLM: {config.plm_name}")
+    print(f"   Gradient Checkpointing: {config.gradient_checkpointing}")
+    embeddings_path = None
 
 # %%
-full_dataset = HDF5EmbeddingDataset(
-    csv_path='../../data/train.csv',
-    h5_path=config.embeddings_path,
-    dataset_name='train',
-    max_length=config.max_seq_length,
-    exclude_ids=LEAKAGE_TRAIN_IDS,
-)
+print("Loading dataset...")
+
+if config.frozen_plm:
+    full_dataset = HDF5EmbeddingDataset(
+        csv_path='../../data/train.csv',
+        h5_path=config.embeddings_path,
+        dataset_name='train',
+        max_length=config.max_seq_length,
+        exclude_ids=LEAKAGE_TRAIN_IDS,
+    )
+    current_collate_fn = collate_fn
+else:
+    full_dataset = SequenceDataset(
+        csv_path='../../data/train.csv',
+        max_length=config.max_seq_length,
+        exclude_ids=LEAKAGE_TRAIN_IDS,
+    )
+    current_collate_fn = collate_fn_sequences
 
 val_size = int(len(full_dataset) * 0.1)
 train_size = len(full_dataset) - val_size
@@ -195,11 +228,11 @@ train_dataset, val_dataset = random_split(
 
 train_loader = DataLoader(
     train_dataset, batch_size=config.batch_size, shuffle=True,
-    collate_fn=collate_fn, num_workers=4, pin_memory=True
+    collate_fn=current_collate_fn, num_workers=4 if config.frozen_plm else 0, pin_memory=True
 )
 val_loader = DataLoader(
     val_dataset, batch_size=config.batch_size, shuffle=False,
-    collate_fn=collate_fn, num_workers=4, pin_memory=True
+    collate_fn=current_collate_fn, num_workers=4 if config.frozen_plm else 0, pin_memory=True
 )
 
 print(f"📊 Train: {len(train_dataset)}, Val: {len(val_dataset)}")
@@ -224,43 +257,63 @@ model = Tier2CNN(
     head_strategy=config.head_strategy,
     head_hidden=config.head_hidden,
     head_dropout=config.head_dropout,
+    frozen_plm=config.frozen_plm,
+    plm_name=config.plm_name,
+    gradient_checkpointing=config.gradient_checkpointing,
 ).to(DEVICE)
 
 print("\n🏗️  Model Summary:")
 print("═" * 60)
+print(f"Mode: {'Frozen PLM' if config.frozen_plm else '🔥 Full Fine-Tuning (FFT)'}")
+print(f"PLM: {config.plm_name}")
 print(f"CNN Type: {config.cnn_type}")
 print(f"CNN Output Channels: {model.cnn.out_channels}")
-print(f"\n📈 Total Parameters: {model.count_parameters():,}")
+
+if config.frozen_plm:
+    print(f"\n📈 Total Parameters: {model.count_parameters():,}")
+else:
+    total_params = model.count_parameters()
+    head_params = model.count_head_parameters()
+    plm_params = total_params - head_params
+    print(f"\n📈 Parameter Breakdown:")
+    print(f"   PLM Backbone: {plm_params:,} (trainable)")
+    print(f"   Head Layers:  {head_params:,}")
+    print(f"   Total:        {total_params:,}")
 print("═" * 60)
 
 # %%
-# Compare with alt CNN type
-alt_type = 'deep' if config.cnn_type == 'multiscale' else 'multiscale'
-alt_model = Tier2CNN(
-    embedding_dim=embedding_dim,
-    cnn_type=alt_type,
-    kernel_sizes=config.kernel_sizes,
-    cnn_out_channels=config.cnn_out_channels,
-    cnn_num_layers=config.cnn_num_layers,
-    cnn_dilations=config.cnn_dilations,
-)
+# Compare with alt CNN type (only in frozen mode to save memory)
+if config.frozen_plm:
+    alt_type = 'deep' if config.cnn_type == 'multiscale' else 'multiscale'
+    alt_model = Tier2CNN(
+        embedding_dim=embedding_dim,
+        cnn_type=alt_type,
+        kernel_sizes=config.kernel_sizes,
+        cnn_out_channels=config.cnn_out_channels,
+        cnn_num_layers=config.cnn_num_layers,
+        cnn_dilations=config.cnn_dilations,
+    )
 
-print("\n📊 CNN Type Comparison:")
-print("─" * 40)
-print(f"  {config.cnn_type:12} │ {model.count_parameters():,} params ← selected")
-print(f"  {alt_type:12} │ {alt_model.count_parameters():,} params")
-print("─" * 40)
-del alt_model
+    print("\n📊 CNN Type Comparison:")
+    print("─" * 40)
+    print(f"  {config.cnn_type:12} │ {model.count_parameters():,} params ← selected")
+    print(f"  {alt_type:12} │ {alt_model.count_parameters():,} params")
+    print("─" * 40)
+    del alt_model
 
 # %%
 # Test forward pass
 sample_batch = next(iter(train_loader))
 model.eval()
 with torch.no_grad():
-    test_input = sample_batch['features'].to(DEVICE)
-    q8_out, q3_out = model(test_input)
-
-print(f"\n✓ Forward Pass: Input {test_input.shape} → Q8 {q8_out.shape}, Q3 {q3_out.shape}")
+    if config.frozen_plm:
+        test_input = sample_batch['features'].to(DEVICE)
+        q8_out, q3_out = model(test_input)
+        print(f"\n✓ Forward Pass: Input {test_input.shape} → Q8 {q8_out.shape}, Q3 {q3_out.shape}")
+    else:
+        test_seqs = sample_batch['sequences']
+        q8_out, q3_out = model(sequences=test_seqs)
+        print(f"\n✓ Forward Pass: Input {len(test_seqs)} seqs → Q8 {q8_out.shape}, Q3 {q3_out.shape}")
 
 # %% [markdown]
 # ## 5. Loss & Optimizer
@@ -327,23 +380,35 @@ fig = plot_training_history(
 # ## 8. Evaluation on CB513 Test Set
 
 # %%
-cb513_path = Path(config.embeddings_path)
+if config.frozen_plm:
+    cb513_path = Path(config.embeddings_path)
+    cb513_available = cb513_path.exists()
+else:
+    cb513_available = Path('../../data/cb513.csv').exists()
 
-if cb513_path.exists():
+if cb513_available:
     try:
-        cb513_dataset = HDF5EmbeddingDataset(
-            csv_path='../../data/cb513.csv',
-            h5_path=config.embeddings_path,
-            dataset_name='cb513',
-            max_length=config.max_seq_length,
-        )
+        if config.frozen_plm:
+            cb513_dataset = HDF5EmbeddingDataset(
+                csv_path='../../data/cb513.csv',
+                h5_path=config.embeddings_path,
+                dataset_name='cb513',
+                max_length=config.max_seq_length,
+            )
+            cb513_collate = collate_fn
+        else:
+            cb513_dataset = SequenceDataset(
+                csv_path='../../data/cb513.csv',
+                max_length=config.max_seq_length,
+            )
+            cb513_collate = collate_fn_sequences
         
         cb513_loader = DataLoader(
             cb513_dataset,
             batch_size=config.batch_size,
             shuffle=False,
-            collate_fn=collate_fn,
-            num_workers=4,
+            collate_fn=cb513_collate,
+            num_workers=4 if config.frozen_plm else 0,
         )
         
         print(f"✓ CB513 test set loaded: {len(cb513_dataset)} samples")
@@ -374,7 +439,10 @@ if cb513_path.exists():
     except Exception as e:
         print(f"⚠️ Could not evaluate on CB513: {e}")
 else:
-    print("⚠️ CB513 embeddings not found. Run extraction first.")
+    if config.frozen_plm:
+        print("⚠️ CB513 embeddings not found. Run extraction first.")
+    else:
+        print("⚠️ CB513 CSV not found.")
 
 # %% [markdown]
 # ## 9. Generate Submission (Optional)
@@ -388,30 +456,39 @@ if GENERATE_SUBMISSION:
     print("📝 GENERATING SUBMISSION")
     print("═" * 60)
     
-    # Check if test embeddings exist
+    # Check if test data exists
     test_csv_path = Path('../../data/test.csv')
     
     if not test_csv_path.exists():
         print(f"❌ Test CSV not found: {test_csv_path}")
-    elif not embeddings_path.exists():
-        print(f"❌ Embeddings not found: {embeddings_path}")
+    elif config.frozen_plm and not Path(config.embeddings_path).exists():
+        print(f"❌ Embeddings not found: {config.embeddings_path}")
     else:
         try:
             # Load test dataset
-            test_dataset = HDF5EmbeddingDataset(
-                csv_path=str(test_csv_path),
-                h5_path=config.embeddings_path,
-                dataset_name='test',
-                max_length=config.max_seq_length,
-                is_test=True,
-            )
+            if config.frozen_plm:
+                test_dataset = HDF5EmbeddingDataset(
+                    csv_path=str(test_csv_path),
+                    h5_path=config.embeddings_path,
+                    dataset_name='test',
+                    max_length=config.max_seq_length,
+                    is_test=True,
+                )
+                test_collate = collate_fn
+            else:
+                test_dataset = SequenceDataset(
+                    csv_path=str(test_csv_path),
+                    max_length=config.max_seq_length,
+                    is_test=True,
+                )
+                test_collate = collate_fn_sequences
             
             test_loader = DataLoader(
                 test_dataset,
                 batch_size=config.batch_size,
                 shuffle=False,
-                collate_fn=collate_fn,
-                num_workers=4,
+                collate_fn=test_collate,
+                num_workers=4 if config.frozen_plm else 0,
             )
             
             print(f"✓ Test set loaded: {len(test_dataset)} samples")
@@ -431,11 +508,16 @@ if GENERATE_SUBMISSION:
             
             with torch.no_grad():
                 for batch in test_loader:
-                    features = batch['features'].to(DEVICE)
                     lengths = batch['lengths']
                     ids = batch['ids']
                     
-                    q8_logits, _ = model(features, return_q3=False)
+                    if config.frozen_plm:
+                        features = batch['features'].to(DEVICE)
+                        q8_logits, _ = model(features, return_q3=False)
+                    else:
+                        sequences = batch['sequences']
+                        q8_logits, _ = model(sequences=sequences, return_q3=False)
+                    
                     q8_preds = q8_logits.argmax(dim=-1)  # (batch, seq_len)
                     
                     for i, (sample_id, length) in enumerate(zip(ids, lengths)):
@@ -473,6 +555,8 @@ else:
 print("\n" + "═" * 60)
 print(f"🎉 TIER 2 {config.cnn_type.upper()} CNN TRAINING COMPLETE")
 print("═" * 60)
+print(f"\n🔧 Training Mode: {'Frozen PLM' if config.frozen_plm else '🔥 Full Fine-Tuning (FFT)'}")
+print(f"   PLM: {config.plm_name}")
 print(f"\n📈 Best Validation Results:")
 print(f"   Harmonic F1: {trainer.best_harmonic_f1:.4f}")
 print(f"   Q8 F1:       {trainer.best_q8_f1:.4f}")
