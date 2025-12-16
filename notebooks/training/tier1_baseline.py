@@ -103,6 +103,9 @@ print("─" * 50)
 
 PLM_NAME = 'protbert'  # Options: 'esm2_8m', 'esm2_35m', 'esm2_650m', 'protbert'
 
+# Generate submission.csv from test.csv using trained model
+GENERATE_SUBMISSION = True
+
 config = Tier1Config(
     # PLM Selection
     plm_name=PLM_NAME,
@@ -439,7 +442,97 @@ else:
     print("⚠️ CB513 embeddings not found. Run extraction first.")
 
 # %% [markdown]
-# ## 9. Summary
+# ## 9. Generate Submission (Optional)
+
+# %%
+if GENERATE_SUBMISSION:
+    from src.config import IDX_TO_SST8
+    import pandas as pd
+    
+    print("\n" + "═" * 60)
+    print("📝 GENERATING SUBMISSION")
+    print("═" * 60)
+    
+    # Check if test embeddings exist
+    test_csv_path = Path('../../data/test.csv')
+    
+    if not test_csv_path.exists():
+        print(f"❌ Test CSV not found: {test_csv_path}")
+    elif not embeddings_path.exists():
+        print(f"❌ Embeddings not found: {embeddings_path}")
+    else:
+        try:
+            # Load test dataset
+            test_dataset = HDF5EmbeddingDataset(
+                csv_path=str(test_csv_path),
+                h5_path=config.embeddings_path,
+                dataset_name='test',
+                max_length=config.max_seq_length,
+                is_test=True,
+            )
+            
+            test_loader = DataLoader(
+                test_dataset,
+                batch_size=config.batch_size,
+                shuffle=False,
+                collate_fn=collate_fn,
+                num_workers=4,
+            )
+            
+            print(f"✓ Test set loaded: {len(test_dataset)} samples")
+            
+            # Load best model
+            best_checkpoint = torch.load(
+                Path(config.checkpoint_dir) / 'best_model.pt',
+                map_location=DEVICE
+            )
+            model.load_state_dict(best_checkpoint['model_state_dict'])
+            model.eval()
+            print(f"✓ Best model loaded (epoch {best_checkpoint.get('epoch', 'unknown')})")
+            
+            # Generate predictions
+            all_ids = []
+            all_preds = []
+            
+            with torch.no_grad():
+                for batch in test_loader:
+                    features = batch['features'].to(DEVICE)
+                    lengths = batch['lengths']
+                    ids = batch['ids']
+                    
+                    q8_logits, _ = model(features, return_q3=False)
+                    q8_preds = q8_logits.argmax(dim=-1)  # (batch, seq_len)
+                    
+                    for i, (sample_id, length) in enumerate(zip(ids, lengths)):
+                        pred_indices = q8_preds[i, :length].cpu().numpy()
+                        pred_str = ''.join([IDX_TO_SST8[idx] for idx in pred_indices])
+                        all_ids.append(sample_id)
+                        all_preds.append(pred_str)
+            
+            # Create submission DataFrame
+            submission_df = pd.DataFrame({
+                'id': all_ids,
+                'sst8': all_preds,
+            })
+            
+            # Save submission
+            submission_path = Path(config.checkpoint_dir) / 'submission.csv'
+            submission_df.to_csv(submission_path, index=False)
+            
+            print(f"\n✓ Submission saved: {submission_path}")
+            print(f"   Total predictions: {len(submission_df)}")
+            print(f"\n   Preview:")
+            print(submission_df.head())
+            
+        except Exception as e:
+            print(f"⚠️ Could not generate submission: {e}")
+            import traceback
+            traceback.print_exc()
+else:
+    print("ℹ️  Submission generation disabled. Set GENERATE_SUBMISSION = True to enable.")
+
+# %% [markdown]
+# ## 10. Summary
 
 # %%
 print("\n" + "═" * 60)
