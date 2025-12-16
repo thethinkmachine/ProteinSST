@@ -4,10 +4,16 @@
 # This notebook is designed for the **Kaggle Protein Secondary Structure Prediction** competition.
 #
 # ## Quick Start
-# 1. Upload `src/` folder as a Kaggle Dataset (or use the cell below to install)
-# 2. Upload pre-extracted embeddings as a Kaggle Dataset (or extract them here)
-# 3. Configure the TIER and hyperparameters
-# 4. Run all cells to train and generate `submission.csv`
+# 1. Upload `src/` folder as a Kaggle Dataset (or clone from GitHub)
+# 2. Configure the TIER, PLM, and training mode
+# 3. Run all cells to train and generate `submission.csv`
+#
+# ## Training Modes
+#
+# | Mode | `FROZEN_PLM` | Description | GPU Memory |
+# |------|-------------|-------------|------------|
+# | **Frozen** | `True` | Uses pre-extracted embeddings (fast) | ~4GB |
+# | **FFT** | `False` | Trains PLM end-to-end (best accuracy) | ~16GB+ |
 #
 # ## Architecture Tiers
 #
@@ -69,6 +75,10 @@ if torch.cuda.is_available():
 TIER = 1  # Options: 1 (baseline), 2 (CNN), 3 (CNN+RNN)
 PLM_NAME = 'protbert'  # Options: 'protbert', 'esm2_8m', 'esm2_35m', 'esm2_650m'
 
+# Training Mode
+FROZEN_PLM = True  # True: Use pre-extracted embeddings (fast, ~4GB GPU)
+                   # False: Train PLM end-to-end (FFT, best accuracy, ~16GB+ GPU)
+
 # Architecture Options (Tier 2 & 3 only)
 CNN_TYPE = 'multiscale'  # Options: 'multiscale', 'deep'
 RNN_TYPE = 'lstm'  # Options: 'lstm', 'gru', 'rnn' (Tier 3 only)
@@ -76,10 +86,19 @@ RNN_TYPE = 'lstm'  # Options: 'lstm', 'gru', 'rnn' (Tier 3 only)
 # Training Settings
 LOSS_TYPE = 'focal'  # Options: 'focal', 'crf', 'weighted_ce', 'ce'
 HEAD_STRATEGY = 'q3guided'  # Options: 'q3guided', 'q3discarding'
-BATCH_SIZE = 32
-LEARNING_RATE = 1e-4
-MAX_EPOCHS = 50
-PATIENCE = 10
+
+# Adjust batch size and learning rate based on mode
+if FROZEN_PLM:
+    BATCH_SIZE = 32
+    LEARNING_RATE = 1e-4
+    MAX_EPOCHS = 50
+    PATIENCE = 10
+else:
+    # FFT mode needs smaller batch and lower LR
+    BATCH_SIZE = 4 if TIER == 3 else 8
+    LEARNING_RATE = 5e-6 if TIER == 3 else 1e-5
+    MAX_EPOCHS = 15
+    PATIENCE = 5
 
 # Output
 GENERATE_SUBMISSION = True
@@ -92,13 +111,13 @@ SEED = 42
 # For Kaggle:
 # TRAIN_CSV = '/kaggle/input/your-competition-name/train.csv'
 # TEST_CSV = '/kaggle/input/your-competition-name/test.csv'
-# EMBEDDINGS_PATH = '/kaggle/input/proteinsst-embeddings/protbert.h5'
+# EMBEDDINGS_PATH = '/kaggle/input/proteinsst-embeddings/protbert.h5'  # Only needed if FROZEN_PLM=True
 # OUTPUT_DIR = '/kaggle/working'
 
 # For local testing:
 TRAIN_CSV = '../../data/train.csv'
 TEST_CSV = '../../data/test.csv'
-EMBEDDINGS_PATH = f'../../data/embeddings/{PLM_NAME}.h5'
+EMBEDDINGS_PATH = f'../../data/embeddings/{PLM_NAME}.h5'  # Only used if FROZEN_PLM=True
 OUTPUT_DIR = '../../checkpoints/kaggle'
 
 # ═══════════════════════════════════════════════════════════════════
@@ -118,6 +137,7 @@ Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
 print(f"\n{'═' * 60}")
 print(f"CONFIGURATION SUMMARY")
 print(f"{'═' * 60}")
+print(f"🔧 Mode: {'Frozen PLM' if FROZEN_PLM else '🔥 Full Fine-Tuning (FFT)'}")
 print(f"🏗️  Tier: {TIER}")
 print(f"📦 PLM: {PLM_NAME}")
 if TIER >= 2:
@@ -126,6 +146,8 @@ if TIER >= 3:
     print(f"🔄 RNN: {RNN_TYPE}")
 print(f"📉 Loss: {LOSS_TYPE}")
 print(f"🎯 Head: {HEAD_STRATEGY}")
+print(f"📊 Batch Size: {BATCH_SIZE}")
+print(f"📈 Learning Rate: {LEARNING_RATE}")
 print(f"🖥️  Device: {DEVICE}")
 print(f"{'═' * 60}")
 
@@ -138,7 +160,7 @@ from src.config import (
     LEAKAGE_TRAIN_IDS, get_embedding_dim, IDX_TO_SST8,
 )
 from src.data import HDF5EmbeddingDataset, collate_fn
-from src.models import Tier1Baseline, Tier2CNN, Tier3CNNRNN
+from src.models import Tier1Baseline, Tier2CNN, Tier3CNNRNN, SequenceDataset, collate_fn_sequences
 from src.losses import get_multitask_loss
 from src.training import Trainer, create_optimizer, create_scheduler
 
@@ -155,6 +177,8 @@ if TIER == 1:
     config = Tier1Config(
         plm_name=PLM_NAME,
         embeddings_path=EMBEDDINGS_PATH,
+        frozen_plm=FROZEN_PLM,
+        gradient_checkpointing=not FROZEN_PLM,
         fc_hidden=512,
         fc_dropout=0.1,
         head_strategy=HEAD_STRATEGY,
@@ -180,6 +204,8 @@ elif TIER == 2:
     config = Tier2Config(
         plm_name=PLM_NAME,
         embeddings_path=EMBEDDINGS_PATH,
+        frozen_plm=FROZEN_PLM,
+        gradient_checkpointing=not FROZEN_PLM,
         cnn_type=CNN_TYPE,
         kernel_sizes=[3, 5, 7, 11],
         cnn_out_channels=64,
@@ -210,7 +236,9 @@ elif TIER == 3:
     config = Tier3Config(
         plm_name=PLM_NAME,
         embeddings_path=EMBEDDINGS_PATH,
-        skip_cnn=False,
+        frozen_plm=FROZEN_PLM,
+        gradient_checkpointing=not FROZEN_PLM,
+        skip_cnn=not FROZEN_PLM,  # Skip CNN in FFT mode (PLM already captures features)
         cnn_type=CNN_TYPE,
         kernel_sizes=[3, 5, 7],
         cnn_out_channels=64,
@@ -243,41 +271,64 @@ elif TIER == 3:
     ModelClass = Tier3CNNRNN
 
 print(f"✓ Tier {TIER} config created")
+print(f"   Mode: {'Frozen' if FROZEN_PLM else 'FFT'}")
 
 # %% [markdown]
 # ## 5. Load Data
+#
+# - **Frozen mode**: Loads pre-extracted embeddings from HDF5 (fast, requires embedding file)
+# - **FFT mode**: Loads raw sequences (PLM tokenizes on-the-fly, no embedding file needed)
 
 # %%
-# Check embeddings exist
-embeddings_path = Path(EMBEDDINGS_PATH)
-if not embeddings_path.exists():
-    print(f"❌ Embeddings not found: {embeddings_path}")
-    print(f"\n   You need to either:")
-    print(f"   1. Upload pre-extracted embeddings as a Kaggle dataset")
-    print(f"   2. Run the embedding extraction cell below")
+if FROZEN_PLM:
+    # FROZEN MODE: Check embeddings exist
+    embeddings_path = Path(EMBEDDINGS_PATH)
+    if not embeddings_path.exists():
+        print(f"❌ Embeddings not found: {embeddings_path}")
+        print(f"\n   You need to either:")
+        print(f"   1. Upload pre-extracted embeddings as a Kaggle dataset")
+        print(f"   2. Set FROZEN_PLM = False to use FFT mode (no embeddings needed)")
+        print(f"   3. Run the embedding extraction section at the bottom")
+    else:
+        import h5py
+        with h5py.File(embeddings_path, 'r') as f:
+            train_count = len(f['train']) if 'train' in f else 0
+            test_count = len(f['test']) if 'test' in f else 0
+            plm_name = f.attrs.get('plm_name', 'unknown')
+            emb_dim = f.attrs.get('embedding_dim', 0)
+        
+        print(f"✓ Embeddings found: {embeddings_path}")
+        print(f"   PLM: {plm_name}, Dim: {emb_dim}")
+        print(f"   Train: {train_count}, Test: {test_count}")
 else:
-    import h5py
-    with h5py.File(embeddings_path, 'r') as f:
-        train_count = len(f['train']) if 'train' in f else 0
-        test_count = len(f['test']) if 'test' in f else 0
-        plm_name = f.attrs.get('plm_name', 'unknown')
-        emb_dim = f.attrs.get('embedding_dim', 0)
-    
-    print(f"✓ Embeddings found: {embeddings_path}")
-    print(f"   PLM: {plm_name}, Dim: {emb_dim}")
-    print(f"   Train: {train_count}, Test: {test_count}")
+    # FFT MODE: No embeddings needed
+    print("🔥 FFT Mode: PLM will be trained end-to-end")
+    print(f"   PLM: {PLM_NAME}")
+    print(f"   No pre-extracted embeddings required!")
+    print(f"   ⚠️  Requires ~16GB+ GPU memory")
 
 # %%
 # Load training data
 print("Loading training data...")
 
-full_dataset = HDF5EmbeddingDataset(
-    csv_path=TRAIN_CSV,
-    h5_path=EMBEDDINGS_PATH,
-    dataset_name='train',
-    max_length=config.max_seq_length,
-    exclude_ids=LEAKAGE_TRAIN_IDS,
-)
+if FROZEN_PLM:
+    # Frozen mode: use pre-computed embeddings
+    full_dataset = HDF5EmbeddingDataset(
+        csv_path=TRAIN_CSV,
+        h5_path=EMBEDDINGS_PATH,
+        dataset_name='train',
+        max_length=config.max_seq_length,
+        exclude_ids=LEAKAGE_TRAIN_IDS,
+    )
+    current_collate_fn = collate_fn
+else:
+    # FFT mode: load raw sequences
+    full_dataset = SequenceDataset(
+        csv_path=TRAIN_CSV,
+        max_length=config.max_seq_length,
+        exclude_ids=LEAKAGE_TRAIN_IDS,
+    )
+    current_collate_fn = collate_fn_sequences
 
 # Train/Val split
 val_size = int(len(full_dataset) * 0.1)
@@ -294,8 +345,8 @@ train_loader = DataLoader(
     train_dataset,
     batch_size=config.batch_size,
     shuffle=True,
-    collate_fn=collate_fn,
-    num_workers=2,
+    collate_fn=current_collate_fn,
+    num_workers=2 if FROZEN_PLM else 0,  # No multiprocessing for FFT
     pin_memory=True,
 )
 
@@ -303,8 +354,8 @@ val_loader = DataLoader(
     val_dataset,
     batch_size=config.batch_size,
     shuffle=False,
-    collate_fn=collate_fn,
-    num_workers=2,
+    collate_fn=current_collate_fn,
+    num_workers=2 if FROZEN_PLM else 0,
     pin_memory=True,
 )
 
@@ -325,6 +376,9 @@ if TIER == 1:
         head_strategy=config.head_strategy,
         head_hidden=config.head_hidden,
         head_dropout=config.head_dropout,
+        frozen_plm=FROZEN_PLM,
+        plm_name=PLM_NAME if not FROZEN_PLM else None,
+        gradient_checkpointing=config.gradient_checkpointing if not FROZEN_PLM else False,
     )
     
 elif TIER == 2:
@@ -341,6 +395,9 @@ elif TIER == 2:
         head_strategy=config.head_strategy,
         head_hidden=config.head_hidden,
         head_dropout=config.head_dropout,
+        frozen_plm=FROZEN_PLM,
+        plm_name=PLM_NAME if not FROZEN_PLM else None,
+        gradient_checkpointing=config.gradient_checkpointing if not FROZEN_PLM else False,
     )
     
 elif TIER == 3:
@@ -362,26 +419,48 @@ elif TIER == 3:
         head_strategy=config.head_strategy,
         head_hidden=config.head_hidden,
         head_dropout=config.head_dropout,
+        frozen_plm=FROZEN_PLM,
+        plm_name=PLM_NAME if not FROZEN_PLM else None,
+        gradient_checkpointing=config.gradient_checkpointing if not FROZEN_PLM else False,
     )
 
 model = model.to(DEVICE)
 
 print(f"\n🏗️  Model: Tier {TIER}")
-print(f"📈 Total Parameters: {model.count_parameters():,}")
+print(f"🔧 Mode: {'Frozen PLM' if FROZEN_PLM else '🔥 FFT'}")
 
+if FROZEN_PLM:
+    print(f"📈 Total Parameters: {model.count_parameters():,}")
+else:
+    total_params = model.count_parameters()
+    head_params = model.count_head_parameters()
+    plm_params = total_params - head_params
+    print(f"📈 Parameter Breakdown:")
+    print(f"   PLM Backbone: {plm_params:,} (trainable)")
+    print(f"   Head Layers:  {head_params:,}")
+    print(f"   Total:        {total_params:,}")
+
+# %%
 # Test forward pass
 sample_batch = next(iter(train_loader))
 model.eval()
 with torch.no_grad():
-    features = sample_batch['features'].to(DEVICE)
     lengths = sample_batch['lengths']
     
-    if TIER == 3:
-        q8_out, q3_out = model(features, lengths=lengths)
+    if FROZEN_PLM:
+        features = sample_batch['features'].to(DEVICE)
+        if TIER == 3:
+            q8_out, q3_out = model(features, lengths=lengths)
+        else:
+            q8_out, q3_out = model(features)
+        print(f"✓ Forward pass: {features.shape} → Q8 {q8_out.shape}, Q3 {q3_out.shape}")
     else:
-        q8_out, q3_out = model(features)
-
-print(f"✓ Forward pass: {features.shape} → Q8 {q8_out.shape}, Q3 {q3_out.shape}")
+        sequences = sample_batch['sequences']
+        if TIER == 3:
+            q8_out, q3_out = model(sequences=sequences, lengths=lengths)
+        else:
+            q8_out, q3_out = model(sequences=sequences)
+        print(f"✓ Forward pass: {len(sequences)} sequences → Q8 {q8_out.shape}, Q3 {q3_out.shape}")
 
 # %% [markdown]
 # ## 7. Setup Training
@@ -476,20 +555,29 @@ if GENERATE_SUBMISSION:
     print(f"✓ Best model loaded (epoch {best_checkpoint.get('epoch', 'unknown')})")
     
     # Load test data
-    test_dataset = HDF5EmbeddingDataset(
-        csv_path=TEST_CSV,
-        h5_path=EMBEDDINGS_PATH,
-        dataset_name='test',
-        max_length=config.max_seq_length,
-        is_test=True,
-    )
+    if FROZEN_PLM:
+        test_dataset = HDF5EmbeddingDataset(
+            csv_path=TEST_CSV,
+            h5_path=EMBEDDINGS_PATH,
+            dataset_name='test',
+            max_length=config.max_seq_length,
+            is_test=True,
+        )
+        test_collate = collate_fn
+    else:
+        test_dataset = SequenceDataset(
+            csv_path=TEST_CSV,
+            max_length=config.max_seq_length,
+            is_test=True,
+        )
+        test_collate = collate_fn_sequences
     
     test_loader = DataLoader(
         test_dataset,
         batch_size=config.batch_size,
         shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=2,
+        collate_fn=test_collate,
+        num_workers=2 if FROZEN_PLM else 0,
     )
     
     print(f"✓ Test set loaded: {len(test_dataset)} samples")
@@ -500,15 +588,22 @@ if GENERATE_SUBMISSION:
     
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="Predicting"):
-            features = batch['features'].to(DEVICE)
             lengths = batch['lengths']
             ids = batch['ids']
             
             # Forward pass
-            if TIER == 3:
-                q8_logits, _ = model(features, lengths=lengths, return_q3=False)
+            if FROZEN_PLM:
+                features = batch['features'].to(DEVICE)
+                if TIER == 3:
+                    q8_logits, _ = model(features, lengths=lengths, return_q3=False)
+                else:
+                    q8_logits, _ = model(features, return_q3=False)
             else:
-                q8_logits, _ = model(features, return_q3=False)
+                sequences = batch['sequences']
+                if TIER == 3:
+                    q8_logits, _ = model(sequences=sequences, lengths=lengths, return_q3=False)
+                else:
+                    q8_logits, _ = model(sequences=sequences, return_q3=False)
             
             q8_preds = q8_logits.argmax(dim=-1)  # (batch, seq_len)
             
@@ -549,6 +644,7 @@ print("═" * 60)
 
 print(f"\n🏗️  Model Configuration:")
 print(f"   Tier: {TIER}")
+print(f"   Mode: {'Frozen PLM' if FROZEN_PLM else '🔥 FFT'}")
 print(f"   PLM: {PLM_NAME}")
 if TIER >= 2:
     print(f"   CNN: {CNN_TYPE}")
@@ -578,14 +674,14 @@ print("═" * 60)
 # %% [markdown]
 # ---
 #
-# ## 📚 Appendix: Extract Embeddings (Run Once)
+# ## 📚 Appendix A: Extract Embeddings (For Frozen Mode)
 #
-# If you don't have pre-extracted embeddings, run this cell to extract them.
-# **Save the output as a Kaggle Dataset for reuse!**
+# Run this section **only if** you want to use `FROZEN_PLM = True` but don't have embeddings yet.
+# After extraction, save the `.h5` file as a Kaggle Dataset for reuse.
 
 # %%
 # ═══════════════════════════════════════════════════════════════════
-# EMBEDDING EXTRACTION (Optional - Run once and save as dataset)
+# EMBEDDING EXTRACTION (For Frozen Mode)
 # ═══════════════════════════════════════════════════════════════════
 
 EXTRACT_EMBEDDINGS = False  # Set to True to extract
@@ -677,3 +773,25 @@ if EXTRACT_EMBEDDINGS:
     
     print(f"✅ Embeddings saved to {output_h5}")
     print(f"   Download this file and upload as a Kaggle Dataset!")
+
+# %% [markdown]
+# ---
+#
+# ## 📚 Appendix B: FFT Mode Tips
+#
+# When using `FROZEN_PLM = False` (Full Fine-Tuning):
+#
+# | Setting | Recommendation |
+# |---------|---------------|
+# | **GPU** | Use Kaggle's P100 (16GB) or better |
+# | **Batch Size** | 4-8 (adjust based on memory) |
+# | **Learning Rate** | 1e-5 to 5e-6 |
+# | **Epochs** | 10-20 (PLM converges faster) |
+# | **Gradient Checkpointing** | Enabled by default (saves memory) |
+#
+# ### Memory Optimization
+# If you run out of memory:
+# 1. Reduce `BATCH_SIZE` to 2-4
+# 2. Use smaller PLM (`esm2_8m` instead of `protbert`)
+# 3. Reduce `max_seq_length` to 256
+# 4. For Tier 3, set `skip_cnn=True` in config
