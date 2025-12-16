@@ -37,7 +37,7 @@ def parse_args():
     parser.add_argument(
         '--plm',
         type=str,
-        default='esm2_35m',
+        default='esm2_650m',
         choices=list(PLM_REGISTRY.keys()),
         help='PLM to use for embedding extraction'
     )

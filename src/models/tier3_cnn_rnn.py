@@ -26,7 +26,8 @@ class Tier3CNNRNN(nn.Module):
     
     Args:
         embedding_dim: PLM embedding dimension
-        # CNN params
+        skip_cnn: If True, bypass CNN entirely and pass PLM embeddings directly to RNN
+        # CNN params (ignored if skip_cnn=True)
         cnn_type: 'multiscale' or 'deep'
         cnn_configs: List of CNNLayerConfig for CNN layers (optional)
         kernel_sizes: List of kernel sizes for multiscale branches
@@ -48,10 +49,19 @@ class Tier3CNNRNN(nn.Module):
         head_dropout: Dropout for classification head
         
     Example:
+        # With CNN
         model = Tier3CNNRNN(
             embedding_dim=768,
             cnn_type='multiscale',
             kernel_sizes=[3, 5, 7],
+            rnn_type='lstm',
+            rnn_hidden=256,
+        )
+        
+        # Without CNN (PLM -> RNN directly)
+        model = Tier3CNNRNN(
+            embedding_dim=768,
+            skip_cnn=True,
             rnn_type='lstm',
             rnn_hidden=256,
         )
@@ -60,6 +70,7 @@ class Tier3CNNRNN(nn.Module):
     def __init__(
         self,
         embedding_dim: int = 768,
+        skip_cnn: bool = False,
         # CNN params
         cnn_type: str = 'multiscale',
         cnn_configs: List[CNNLayerConfig] = None,
@@ -85,11 +96,15 @@ class Tier3CNNRNN(nn.Module):
         super().__init__()
         
         self.embedding_dim = embedding_dim
-        self.cnn_type = cnn_type
+        self.skip_cnn = skip_cnn
+        self.cnn_type = cnn_type if not skip_cnn else None
         self.rnn_type = rnn_type
         
-        # Build CNN
-        if cnn_type == 'multiscale':
+        # Build CNN (only if not skipping)
+        if skip_cnn:
+            self.cnn = None
+            rnn_input_dim = embedding_dim
+        elif cnn_type == 'multiscale':
             self.cnn = MultiscaleCNN(
                 in_channels=embedding_dim,
                 layer_configs=cnn_configs,
@@ -99,6 +114,7 @@ class Tier3CNNRNN(nn.Module):
                 batch_norm=cnn_batch_norm,
                 dropout=cnn_dropout,
             )
+            rnn_input_dim = self.cnn.out_channels
         elif cnn_type == 'deep':
             self.cnn = DeepCNN(
                 in_channels=embedding_dim,
@@ -112,14 +128,13 @@ class Tier3CNNRNN(nn.Module):
                 dropout=cnn_dropout,
                 residual=cnn_residual,
             )
+            rnn_input_dim = self.cnn.out_channels
         else:
             raise ValueError(f"Unknown cnn_type: {cnn_type}")
         
-        cnn_output_dim = self.cnn.out_channels
-        
         # Build RNN
         self.rnn = ConfigurableRNN(
-            input_size=cnn_output_dim,
+            input_size=rnn_input_dim,
             hidden_size=rnn_hidden,
             num_layers=rnn_layers,
             rnn_type=rnn_type,
@@ -177,9 +192,10 @@ class Tier3CNNRNN(nn.Module):
             Tuple of (q8_logits, q3_logits or None)
         """
         # CNN: (batch, seq_len, channels) -> (batch, seq_len, cnn_out)
-        x = self.cnn(features)
+        # Skip CNN if configured
+        x = features if self.skip_cnn else self.cnn(features)
         
-        # RNN: (batch, seq_len, cnn_out) -> (batch, seq_len, rnn_out)
+        # RNN: (batch, seq_len, input_dim) -> (batch, seq_len, rnn_out)
         x = self.rnn(x, lengths)
         
         # Classification
